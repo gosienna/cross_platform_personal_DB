@@ -293,25 +293,50 @@
    */
   const newRecord = () => ({ hints: {}, items: [], meds: [], skipped: [], recordDate: null });
 
+  /**
+   * How a page label is read: { skip } (UI noise / a time header), a record date, or { label, how, unmapped }.
+   * A page template stores this per field, so the label can be changed without the page changing.
+   */
+  function specFor(rawLabel, ctx = {}) {
+    const kind = labelKind(rawLabel);
+    if (kind === 'ignore' || kind === 'time') return { skip: true, rawLabel };
+    if (kind === 'recordDate') return { recordDate: true, label: cleanLabel(rawLabel), rawLabel };
+    const r = resolveLabel(rawLabel, ctx);
+    if (r && r.ignore) return { skip: true, rawLabel };
+    return { label: r ? r.label : null, rawLabel, how: r ? r.how : null, unmapped: !r };
+  }
+  const GLUCOSE_TAG = /\s*\((AC|PC|HS)\)$/;
+  const entryOf = (label) => (label ? S().byLabel[label] || S().byLabel[label.replace(GLUCOSE_TAG, '')] || null : null);
+
   /** Turn one (label, value) pair into record items. */
   function addPair(rec, rawLabel, rawValue, ctx, ref, timeOverride) {
-    const kind = labelKind(rawLabel);
-    if (kind === 'ignore') return;
+    const spec = specFor(rawLabel, ctx);
+    if (!spec.skip) addMapped(rec, spec, rawValue, ctx, ref, timeOverride);
+  }
+
+  /**
+   * One value with a known label → record items.
+   * spec: { label, rawLabel, recordDate?, how?, unmapped?, strict?, fid? }
+   *   strict: from a page template. The label is the user's choice, so the "is this really a label?" guesses are
+   *           skipped, and a record date does not become the fallback time (each field has its own time link).
+   * timeOverride: 'nan' | 'YYYYMMDD[HHmm]' | null (no time) | undefined (capture time; relative-time readings skipped)
+   */
+  function addMapped(rec, spec, rawValue, ctx = {}, ref = null, timeOverride) {
     const value = joinLines(rawValue);
     if (isEmptyValue(value)) return;
-    if (kind === 'recordDate') {
+    const rawLabel = spec.rawLabel || spec.label || '';
+    const extra = spec.fid ? { fid: spec.fid } : {};
+    if (spec.recordDate) {
       const p = parseDateTime(value);
-      if (p && p.kind !== 'relative') rec.recordDate = formatTime(p);
-      rec.items.push({ label: cleanLabel(rawLabel), value: p ? isoDate(p) : value, time: p && p.kind !== 'relative' ? formatTime(p) : null, rawLabel, raw: value, ref });
+      const own = p && p.kind !== 'relative' ? formatTime(p) : null;
+      if (own && !spec.strict) rec.recordDate = own;
+      rec.items.push({ label: spec.label || cleanLabel(rawLabel), value: p ? isoDate(p) : value, time: spec.strict && timeOverride !== undefined ? timeOverride : own, rawLabel, raw: value, ref, how: spec.how || null, ...extra });
       return;
     }
-    if (kind === 'time') return;
-    const r = resolveLabel(rawLabel, ctx);
-    if (r && r.ignore) return;
     const { unit } = normLabel(rawLabel);
-    if (r && r.entry) {
-      const e = r.entry;
-      if (e.type === 'medication') { const m = buildMedication({ drug: rawValue }); if (m) rec.meds.push({ ...m, ref }); return; }
+    const e = entryOf(spec.label);
+    if (e) {
+      if (e.type === 'medication') { const m = buildMedication({ drug: rawValue }); if (m) rec.meds.push({ ...m, ref, ...extra }); return; }
       const n = normalizeValue(e, rawValue, { unit });
       if (!n) return;
       if (e.vital && timeOverride === undefined && !e.persistent) {
@@ -319,16 +344,21 @@
         if (/\d+\s*(分鐘|小時|天|週|個月|年)前|ago/i.test(rawValue)) { rec.skipped.push({ label: e.label, raw: value, reason: 'relative time' }); return; }
       }
       if (e.identity && !rec.hints[e.identity]) rec.hints[e.identity] = n.value;
-      rec.items.push({ label: n.label || e.label, value: n.value, time: e.persistent ? 'nan' : timeOverride ?? null,
-        rawLabel, raw: value, warn: n.warn, entry: e, how: r.how, ref });
+      // a glucose tag read from the value wins; otherwise the chosen label (which may carry its own tag)
+      const label = n.label && n.label !== e.label ? n.label : spec.label || e.label;
+      rec.items.push({ label, value: n.value, time: e.persistent ? 'nan' : timeOverride ?? null,
+        rawLabel, raw: value, warn: n.warn, entry: e, how: spec.how, ref, ...extra });
       return;
     }
-    const label = r && r.label ? r.label : cleanLabel(rawLabel);
-    if (!label || label.length > 40 || /^[\d\s:：.\-/]+$/.test(label)) return;
-    if (!r && value.length === 1 && !/[\da-z\u3400-\u9fff]/i.test(value)) return;
+    const label = spec.label || cleanLabel(rawLabel);
+    if (!label) return;
+    if (!spec.strict) {
+      if (label.length > 40 || /^[\d\s:：.\-/]+$/.test(label)) return;
+      if (spec.unmapped && value.length === 1 && !/[\da-z㐀-鿿]/i.test(value)) return;
+    }
     let v = value;
     if (/^\d{2,4}[\/\-.]\d{1,2}[\/\-.]\d{1,2}$/.test(value)) { const p = parseDateTime(value); if (p) v = isoDate(p); } // a bare date → ISO
-    rec.items.push({ label, value: v, time: timeOverride ?? null, rawLabel, raw: value, unmapped: !r, how: r ? r.how : null, ref });
+    rec.items.push({ label, value: v, time: timeOverride ?? null, rawLabel, raw: value, unmapped: !!spec.unmapped, how: spec.how || null, ref, ...extra });
   }
 
   /** Pair a label cell with a value cell, splitting stacked lines ("姓名 | 身分證號" over "王 | A123"). */
@@ -388,85 +418,127 @@
     return { kind: rec.items.length || rec.meds.length ? 'kv' : 'none', records: [rec] };
   }
 
-  /** Header row + data rows; each data row is a reading or a patient. */
+  /**
+   * Header row + data rows; each data row is a reading or a patient.
+   * Returns { kind: 'list', records, map }; map says how each column was read (a page template keeps it).
+   */
   function tryList(rows, ctx) {
     if (rows.length < 2) return null;
     for (let h = 0; h < Math.min(2, rows.length - 1); h++) {
-      const header = rows[h];
-      const cols = header.map((c) => {
-        const t = c.lines.join(' ');
-        const kind = labelKind(t);
-        const r = kind ? null : resolveLabel(t, ctx);
-        const part = medPart(t);
-        return { text: t, kind, r, part: part || (c.lines.length > 1 ? medPart(c.lines[0]) : null), lines: c.lines };
-      });
-      const mapped = cols.filter((c) => c.kind === 'time' || c.kind === 'generic' || c.part || (c.r && c.r.entry)).length;
-      const filled = cols.filter((c) => clean(c.text));
-      const labelish = filled.filter((c) => isLabelish(c.text, ctx) || (c.lines.length > 1 && c.lines.every((l) => isLabelish(l, ctx)))).length;
-      const dataRows = rows.slice(h + 1);
-      // a list has ≥2 mapped headers, a header row made of labels, and data rows that are not label/value pairs
-      const allTh = header.every((c) => !clean(c.text) || c.th);
-      if (mapped < 2 || labelish / Math.max(1, filled.length) < (allTh ? 0.5 : 0.7)) continue;
-      const kvRows = dataRows.filter((r) => r.length >= 2 && isLabelish(r[0].text, ctx) && !isLabelish(r[1].text, ctx)).length;
-      if (kvRows > dataRows.length / 2) continue;
-      const hasMed = cols.some((c) => c.part === 'drug');
-      const genericVital = cols.some((c) => c.kind === 'generic') ? vitalFromText(ctx.heading || '') : null;
-      const records = [];
-      for (const row of dataRows) {
-        if (row.every((c) => !clean(c.text))) continue;
-        const rec = newRecord();
-        let time = null;
-        const timeCols = cols.map((c, i) => (c.kind === 'time' ? i : -1)).filter((i) => i >= 0);
-        if (timeCols.length) {
-          const p = parseDateTime(timeCols.map((i) => row[i]?.text || '').join(' '), { refYear: ctx.refYear, refDate: ctx.refDate });
-          if (p && p.kind === 'relative') { rec.skipped.push({ label: 'row', raw: row.map((c) => c.text).join(' | '), reason: 'relative time' }); continue; }
-          time = p ? formatTime(p) : null;
-        }
-        const med = {};
-        cols.forEach((c, i) => {
-          const cell = row[i];
-          if (!cell || !clean(cell.text) || c.kind === 'time' || c.kind === 'ignore') return;
-          if (hasMed && c.part && !(c.r && c.r.entry && c.r.entry.identity)) { med[c.part] = (med[c.part] ? med[c.part] + '\n' : '') + cell.lines.join('\n'); return; }
-          if (c.kind === 'generic') {
-            if (genericVital) addPair(rec, genericVital.label, cell.lines.join('\n'), ctx, cell.ref, time);
-            else addPair(rec, c.text, cell.lines.join('\n'), ctx, cell.ref, time);
-            return;
-          }
-          const ident = c.r && c.r.entry && c.r.entry.identity;
-          if (hasMed && !ident && !(c.r && c.r.entry)) return; // extra columns of a medication table
-          if (ident) { addPair(rec, c.text, cell.lines.join('\n'), ctx, cell.ref); return; }
-          if (c.lines.length > 1 && c.lines.length === cell.lines.length) {
-            c.lines.forEach((l, k) => addPair(rec, l, cell.lines[k], ctx, cell.ref, time));
-          } else addPair(rec, c.text, cell.lines.join('\n'), ctx, cell.ref, time);
-        });
-        if (hasMed) { const m = buildMedication(med); if (m) rec.meds.push({ ...m, ref: row[0]?.ref }); }
-        if (rec.items.length || rec.meds.length) records.push(rec);
-      }
-      if (records.length) return { kind: 'list', records };
+      const map = listMap(rows, h, ctx);
+      if (!map) continue;
+      const records = applyList(rows, map, ctx);
+      if (records.length) return { kind: 'list', records, map };
     }
     return null;
   }
 
+  /** If row h is the header of a list: how each column is read. Otherwise null. */
+  function listMap(rows, h, ctx = {}) {
+    const header = rows[h];
+    const cols = header.map((c) => {
+      const t = c.lines.join(' ');
+      const kind = labelKind(t);
+      const r = kind ? null : resolveLabel(t, ctx);
+      const part = medPart(t);
+      return { text: t, kind, r, part: part || (c.lines.length > 1 ? medPart(c.lines[0]) : null), lines: c.lines };
+    });
+    const mapped = cols.filter((c) => c.kind === 'time' || c.kind === 'generic' || c.part || (c.r && c.r.entry)).length;
+    const filled = cols.filter((c) => clean(c.text));
+    const labelish = filled.filter((c) => isLabelish(c.text, ctx) || (c.lines.length > 1 && c.lines.every((l) => isLabelish(l, ctx)))).length;
+    const dataRows = rows.slice(h + 1);
+    // a list has ≥2 mapped headers, a header row made of labels, and data rows that are not label/value pairs
+    const allTh = header.every((c) => !clean(c.text) || c.th);
+    if (mapped < 2 || labelish / Math.max(1, filled.length) < (allTh ? 0.5 : 0.7)) return null;
+    const kvRows = dataRows.filter((r) => r.length >= 2 && isLabelish(r[0].text, ctx) && !isLabelish(r[1].text, ctx)).length;
+    if (kvRows > dataRows.length / 2) return null;
+    const genericVital = cols.some((c) => c.kind === 'generic') ? vitalFromText(ctx.heading || '') : null;
+    return {
+      layout: 'list', headerRow: h, hasMed: cols.some((c) => c.part === 'drug'),
+      columns: cols.map((c, i) => ({
+        i, header: c.text, kind: c.kind || null, part: c.part || null,
+        ident: !!(c.r && c.r.entry && c.r.entry.identity), vocab: !!(c.r && c.r.entry),
+        spec: c.kind === 'time' || c.kind === 'ignore' ? { skip: true, rawLabel: c.text } : specFor(c.kind === 'generic' && genericVital ? genericVital.label : c.text, ctx),
+        sub: c.kind !== 'generic' && c.lines.length > 1 ? c.lines.map((l) => specFor(l, ctx)) : null,
+      })),
+      time: { mode: 'column', cols: cols.map((c, i) => (c.kind === 'time' ? i : -1)).filter((i) => i >= 0) },
+    };
+  }
+
+  /**
+   * Read the data rows of a list with a column map.
+   * opts: { strict, fid (table id: items get fid "<fid>:<column>"), time (a TimeLink overriding map.time), fixedTime }
+   */
+  function applyList(rows, map, ctx = {}, opts = {}) {
+    const { strict = false, fid = null } = opts;
+    const link = opts.time || map.time || { mode: 'column', cols: [] };
+    const timeCols = link.mode === 'column' ? link.cols || [] : [];
+    const sp = (s, key) => ({ ...s, strict, fid: fid ? `${fid}:${key}` : undefined });
+    const records = [];
+    for (const row of rows.slice(map.headerRow + 1)) {
+      if (row.every((c) => !clean(c.text))) continue;
+      const rec = newRecord();
+      let time = null;
+      if (link.mode === 'nan') time = 'nan';
+      else if (link.mode === 'field') time = opts.fixedTime ?? null;
+      else if (timeCols.length) {
+        const p = parseDateTime(timeCols.map((i) => row[i]?.text || '').join(' '), { refYear: ctx.refYear, refDate: ctx.refDate });
+        if (p && p.kind === 'relative') continue; // a reading with only a relative time ("4小時前")
+        time = p ? formatTime(p) : null;
+      }
+      const med = {};
+      for (const c of map.columns) {
+        const cell = row[c.i];
+        if (!cell || !clean(cell.text) || c.kind === 'time' || c.kind === 'ignore' || c.off) continue;
+        if (map.hasMed && c.part && !c.ident) { med[c.part] = (med[c.part] ? med[c.part] + '\n' : '') + cell.lines.join('\n'); continue; }
+        if (c.spec.skip) continue;
+        if (c.kind === 'generic') { addMapped(rec, sp(c.spec, c.i), cell.lines.join('\n'), ctx, cell.ref, time); continue; }
+        if (map.hasMed && !c.ident && !c.vocab && !c.taught) continue; // extra columns of a medication table
+        if (c.ident) { addMapped(rec, sp(c.spec, c.i), cell.lines.join('\n'), ctx, cell.ref); continue; }
+        if (c.sub && c.sub.length === cell.lines.length) {
+          c.sub.forEach((s, k) => { if (!s.skip) addMapped(rec, sp(s, `${c.i}.${k}`), cell.lines[k], ctx, cell.ref, time); });
+        } else addMapped(rec, sp(c.spec, c.i), cell.lines.join('\n'), ctx, cell.ref, time);
+      }
+      if (map.hasMed) { const m = buildMedication(med); if (m) rec.meds.push({ ...m, ref: row[0]?.ref, ...(fid ? { fid: `${fid}:med` } : {}) }); }
+      if (rec.items.length || rec.meds.length) records.push(rec);
+    }
+    return records;
+  }
+
   /** Vital-sign chart with vitals as rows and times as columns. */
   function tryChart(rows, ctx) {
-    const labelCol = rows.map((r) => r[0]);
-    const vitalRows = labelCol.map((c, i) => ({ i, r: resolveLabel(c.text, ctx) })).filter((x) => x.r && x.r.entry && x.r.entry.vital);
+    const map = chartMap(rows, ctx);
+    if (!map) return null;
+    const rec = applyChart(rows, map, ctx);
+    return rec.items.length ? { kind: 'chart', records: [rec], map } : null;
+  }
+  function chartMap(rows, ctx = {}) {
+    const vitalRows = rows.map((r, i) => ({ i, r: resolveLabel(r[0].text, ctx) })).filter((x) => x.r && x.r.entry && x.r.entry.vital);
     if (vitalRows.length < 2) return null;
-    const first = vitalRows[0].i;
+    return { layout: 'chart', first: vitalRows[0].i, rows: vitalRows.map(({ i }) => ({ i, header: rows[i][0].text, spec: specFor(rows[i][0].text, ctx) })), time: { mode: 'column' } };
+  }
+  /** Read a chart with a row map. opts as for applyList. */
+  function applyChart(rows, map, ctx = {}, opts = {}) {
+    const { strict = false, fid = null } = opts;
+    const link = opts.time || map.time || { mode: 'column' };
     const width = Math.max(...rows.map((r) => r.length));
     const rec = newRecord();
     for (let j = 1; j < width; j++) {
-      const head = rows.slice(0, first).map((r) => r[j]?.text || '').join(' ')
-        + ' ' + rows.filter((r) => labelKind(r[0].text) === 'time').map((r) => r[j]?.text || '').join(' ');
-      const p = parseDateTime(head, { refYear: ctx.refYear, refDate: ctx.refDate });
-      if (!p || p.kind === 'relative') continue;
-      const time = formatTime(p);
-      for (const { i } of vitalRows) {
-        const cell = rows[i][j];
-        if (cell && clean(cell.text)) addPair(rec, rows[i][0].text, cell.lines.join('\n'), ctx, cell.ref, time);
+      let time;
+      if (link.mode === 'column') {
+        const head = rows.slice(0, map.first).map((r) => r[j]?.text || '').join(' ')
+          + ' ' + rows.filter((r) => labelKind(r[0].text) === 'time').map((r) => r[j]?.text || '').join(' ');
+        const p = parseDateTime(head, { refYear: ctx.refYear, refDate: ctx.refDate });
+        if (!p || p.kind === 'relative') continue;
+        time = formatTime(p);
+      } else time = link.mode === 'nan' ? 'nan' : link.mode === 'field' ? opts.fixedTime ?? null : null;
+      for (const vr of map.rows) {
+        if (vr.spec.skip || vr.off) continue;
+        const cell = rows[vr.i] && rows[vr.i][j];
+        if (cell && clean(cell.text)) addMapped(rec, { ...vr.spec, strict, fid: fid ? `${fid}:${vr.i}` : undefined }, cell.lines.join('\n'), ctx, cell.ref, time);
       }
     }
-    return rec.items.length ? { kind: 'chart', records: [rec] } : null;
+    return rec;
   }
 
   /** Pairs found outside tables (forms, divs, dl, "label：value" text) → items of the page record. */
@@ -541,14 +613,15 @@
   function recordToRows(rec, { source, captureTime }) {
     const rows = [];
     const fallback = rec.recordDate || captureTime;
-    const seen = new Set();
+    const seen = new Map();
     const slot = new Map(); // label|time → first value (one value per key unless the label is multi)
     for (const it of rec.items) {
       const time = it.time || fallback;
       const k = `${it.label}|${time}|${it.value}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
+      // the same value read twice (e.g. by two template fields): one row, which knows every field it stands for
+      if (seen.has(k)) { const r0 = seen.get(k); if (it.fid && it.fid !== r0._item.fid) (r0._fids = r0._fids || [r0._item.fid]).push(it.fid); continue; }
       const row = { label: it.label, value: it.value, time, source, _item: it };
+      seen.set(k, row);
       const sk = `${it.label}|${time}`;
       if (!isMulti(it.label)) { if (slot.has(sk)) row._conflictWith = slot.get(sk); else slot.set(sk, it.value); }
       rows.push(row);
@@ -562,7 +635,7 @@
       rows.splice(rows.indexOf(d), 1);
     }
     for (const m of rec.meds) {
-      rows.push({ label: 'Medication', value: medValue(m.fields), time: m.start ? formatTime(m.start) : fallback, source, _item: { label: 'Medication', rawLabel: 'Medication', ref: m.ref, region: m.region, entry: S().byKey.medication } });
+      rows.push({ label: 'Medication', value: medValue(m.fields), time: m.start ? formatTime(m.start) : fallback, source, _item: { label: 'Medication', rawLabel: 'Medication', ref: m.ref, region: m.region, entry: S().byKey.medication, fid: m.fid, fp: m.fp } });
     }
     return rows;
   }
@@ -640,7 +713,8 @@
     nfkc, clean, cleanLabel, normLabel, resolveLabel, labelKind, medPart, vitalFromText,
     parseDateTime, formatTime, isoDate, utcStamp, displayTime, timeToDate,
     normalizeValue, buildMedication, medValue,
-    newRecord, addPair, addStacked, analyzeTable, recordFromPairs, mergeRecords, recordToRows,
+    newRecord, specFor, addPair, addMapped, addStacked, analyzeTable, listMap, applyList, chartMap, applyChart,
+    recordFromPairs, mergeRecords, recordToRows, isEmptyValue, joinLines,
     rowKey, isMulti, diffRows, buildIdentityIndex, resolveIdentity,
     FIELDS, toCSV, parseCSV, gridFromArrays,
     _resetIndex: () => { _idx = null; },

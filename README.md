@@ -42,7 +42,7 @@ Every value is one row:
 - `nan` for persistent labels: Name, Sex, Birth date, National ID, MRN, Blood type, phone, address, …
 - `YYYYMMDD` for a date only.
 - `YYYYMMDDHHmm` in **UTC** for a date and time, so 14:00 Taipei time is stored as `0600`.
-- A timed value with no time on the page gets the form's date (填表日期, 醫囑日期 …), or else the capture time.
+- Where a value's time comes from is set per field in the page's template (see **Page templates** below): fixed (`nan`), the date in another field of the page (填表日期, 醫囑日期 …), the row's time column in a table, or the capture time. The first draft links timed values to the form's date when the page has one.
 - Readings with only a relative time ("4小時前") are skipped and listed in the preview.
 
 **source**
@@ -65,8 +65,28 @@ The extension ID is fixed by the `key` in the manifest: `obkilllebkjkeglikimoaig
 
 ## Daily use
 
+### Page templates
+Each page (a site's frame page; record numbers in the address don't matter) has **one template** that maps every value on it. The assumption is that a page's layout doesn't change.
+
+1. **First visit:** the built-in rules read the page and make a **draft template**. A yellow banner says so. When you press **Save**, the draft is saved as the page's template. Rows you unticked are left out of it.
+2. **After that:** the page is read **strictly by its template**. Only template fields are saved, under the labels the template gives them.
+3. **New things on the page:** values the rules see that the template doesn't cover are listed as *"N values on this page aren't in the template → Review"*, and outlined on the page. **Add** them to the template, or **Ignore** them so they aren't offered again. Nothing outside the template is ever saved.
+4. **Editing:** in the side panel, change a row's label, or choose **Remove from template**; **Teach** adds a field. In **Dashboard → Mappings** you can do the same on the page's saved sample. Changes made in the side panel are kept when you press **Save**, or **Save template** to keep them without saving data.
+
+**Time links.** Each row shows a **⏱ chip** saying where its time comes from:
+
+| Chip | Meaning |
+|---|---|
+| `⏱ fixed` | no time (`nan`); always so for personal details |
+| `⏱ ← 填表日期` | the date in that field of the page |
+| `⏱ own value` | the field is a date itself (e.g. 填表日期) |
+| `⏱ ← column 測量時間` | each table row's own time cell |
+| `⏱ capture time ⚠` | when you pressed Scan; usually not what you want for timed data |
+
+Hover a chip to outline the value and its time source on the page. Click it to choose another: fixed, capture time, a date field, a table's time column, or **Pick the date on the page…**.
+
 ### Capture (side panel → Capture)
-1. Open a patient page in the HIS and press **Scan page**. Every frame is read, including nested iframes.
+1. Open a patient page in the HIS and press **Scan page**. Every frame is read, including nested iframes, each by its own page template (or a draft of one).
 2. The page gets coloured outlines:
    - **green**: recognised;
    - **amber**: unknown label;
@@ -76,17 +96,18 @@ The extension ID is fixed by the `key` in the manifest: `obkilllebkjkeglikimoaig
 3. In the panel, check the rows:
    - untick what you don't want;
    - edit a value;
-   - map an unknown label using the dropdown (double-click a label to change it). That choice is remembered and used by Fill too.
+   - map an unknown label using the dropdown (double-click a label to change it). The label goes into the page's template, and is also learned for drafts of other pages and for Fill;
+   - check each row's ⏱ time chip.
 4. Check the patient ID, then press **Save**.
 
 **More capture tools**
 - **Pick region**: capture only the part of the page you click.
-- **Teach**: click a value, a form field or a tick box and give it a label.
+- **Teach**: click a value, a form field or a tick box and give it a label. It becomes a field of the page's template.
   - A click on any tick box, radio button or tick-box picture, or on its text, teaches the **whole group**; its value is the ticked options.
-  - It is saved as a template for that site and found again even if the layout shifts.
-  - **Fill uses it too**: a field taught on a read-only page is found on the edit form by the text before it, and the other way round.
+  - It is found again by its position, and by the text before it if the layout shifts.
+  - **Fill uses it too**: a field on a read-only page is found on the edit form by the text before it, and the other way round.
 - **Screenshot** / **Pick media**: save the visible page, or an image, chart, audio clip or video.
-- **AI extract**: see Privacy below.
+- **AI extract**: Claude reads a masked copy of the page (see Privacy below). Its answer becomes **suggested changes to the page's template**: new fields, better labels, and the date each value belongs to. Each value is found on the page itself; you tick what to apply. Values are never saved from the AI's answer directly, so the page is read the same way every time. Values that aren't one element of the page are listed as not found.
 
 ### Fill another site's form (side panel → Fill)
 1. Choose the patient, and optionally which date's vitals to use.
@@ -112,7 +133,11 @@ The extension ID is fixed by the `key` in the manifest: `obkilllebkjkeglikimoaig
   - JSON;
   - a FHIR R4 Bundle (Patient, LOINC-coded vital-sign Observations, blood pressure as a panel, MedicationStatement, Media);
   - with media included, any of these comes out as a zip.
-- **Mappings**: every learned label (all sites or one site, and where it was learned) and every template. You can delete them, or export and import them.
+- **Mappings**:
+  - **Page templates**: one per page. Open one to see its **sample page**: a masked copy saved with the template (values and personal details replaced by `[labels]`, no scripts, nothing loaded from the network). It keeps the page's layout: all its stylesheets (other sites' ones are fetched when the template is saved) in their original order, and pictures as grey boxes of the same size. Fonts and background pictures from the network are left out. Every field is outlined: green value, violet personal detail, dashed blue time source, amber unknown label, grey not saved. Hover a value to see a dashed arrow to its time source.
+  - **◂ Field list** opens the field list as a side panel beside the sample (hidden until you open it): label, the text it sits next to on the page, and its ⏱ time link. **Edit** changes the label, the time link (including **Pick the date in the sample page…**) or leaves the field out; for tables, which columns are saved and as what. **+ Add a field** lets you click an element of the sample. Fields added on the sample are matched to the live page the next time you scan it.
+  - Learned labels (all sites or one site, and where they were learned), and fields taught in Fill.
+  - Delete, export and import. The export includes templates and their masked samples.
 - **Settings & backup**: backup, AI and privacy settings, and an audit log of everything sent to AI.
 
 ## Google Drive backup (optional)
@@ -155,13 +180,13 @@ Every request goes through the privacy gate in [extension/lib/redact.js](extensi
    - Per category, choose in Settings: always mask, ask, or send.
 4. **Screenshots** (optional). Known personal fields are blacked out, and you can draw more boxes yourself. You must tick "I checked the image" before it can be sent.
 5. **Hard block.** If a national ID, phone number or email is still in the outgoing text and you didn't explicitly approve it, nothing is sent.
-6. **Back to real values locally.** The reply contains only placeholders; they are swapped back to the real values in the side panel, and the result goes through the normal preview.
+6. **Back to real values locally.** The reply contains only placeholders; they are swapped back to the real values in the side panel. The values are then looked up on the page and offered as changes to the page's template; nothing from the reply is saved as data.
 7. **Audit log.** The last 20 payloads exactly as sent are kept locally, in **Settings → Audit log**.
 
 ## Development
 
 ```
-npm test            # 57 tests: extraction, fill, templates, export/FHIR/zip, crypto, backup, privacy gate, UI smoke
+npm test            # 81 tests: extraction, page templates (parity with the rules, strict reading, time links, sample pages), fill, export/FHIR/zip, crypto, backup, privacy gate, UI smoke
 npm run check       # syntax check of every extension script
 npm run build:vendor  # re-bundle @anthropic-ai/sdk and SheetJS into extension/vendor/
 ```
@@ -183,11 +208,12 @@ npm run build:vendor  # re-bundle @anthropic-ai/sdk and SheetJS into extension/v
 | `extension/lib/core.js` | Label matching, ROC/UTC date parsing, value normalisation, table analysis, identity matching, deduplication |
 | `extension/lib/dom.js` | Reads pages: tables, forms, label/value siblings, checkbox images, frames |
 | `extension/lib/fill.js` | Autofill |
-| `extension/lib/templates.js` | Teach-mode templates |
+| `extension/lib/templates.js` | Finding a field again: selector, the text before it, its label text |
+| `extension/lib/pagetpl.js` | Page templates: draft from the rules, strict reading, time links, "not in template", masked sample pages |
 | `extension/lib/export.js` | Export and import: CSV, JSON, FHIR, zip |
 | `extension/lib/backup.js`, `crypto.js` | Google Drive backup and its encryption |
 | `extension/lib/redact.js`, `ai.js` | Privacy gate and Claude extract |
 | `extension/content/agent.js` | In-page overlay, picker and fill (injected only when you press a button) |
 | `extension/sidepanel/`, `extension/dashboard/` | The user interface |
 
-**Adding your system's wording:** add synonyms in `schema.js`, or map labels in the side panel; learned mappings are shared by Capture and Fill.
+**Adding your system's wording:** add synonyms in `schema.js`, or map labels in the side panel; learned labels are used for the drafts of new pages' templates and by Fill.

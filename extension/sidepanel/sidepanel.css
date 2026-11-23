@@ -31,3 +31,16 @@
 .listtools input[type=search] { flex: 1; min-width: 0; }
 .listtools .marks.off { color: var(--mut); text-decoration: line-through; }
 .listtools .small { white-space: nowrap; }
+
+/* page template banner, time chips */
+.pagebar { border: 1px solid var(--line); border-left: 3px solid #1a9e5a; border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; font-size: 12px; display: grid; gap: 4px; }
+.pagebar.draft { border-left-color: #c48a00; }
+.pagebar .unc { color: #8a6100; }
+td.t { white-space: nowrap; }
+.chip { display: block; margin-top: 2px; border: 1px solid var(--line); background: var(--soft); border-radius: 9px; padding: 0 6px; font-size: 11px; color: #2f6fd6; cursor: pointer; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.warn { color: #8a6100; border-color: #e0c060; }
+.chip:disabled { color: var(--mut); cursor: default; }
+#dlgForm .choices { display: grid; gap: 4px; }
+td.b { white-space: nowrap; }
+.rec button.rm { color: var(--mut); padding: 0 4px; margin-left: 2px; }
+.rec button.rm:hover { color: var(--bad); }

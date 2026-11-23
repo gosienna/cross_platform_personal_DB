@@ -1,11 +1,13 @@
 /* Side panel: Scan → Preview → Save, and Scan form → Preview → Fill. */
 (() => {
   const { h, $, $$, modal, dataURLtoBlob, sourceOf, vocabLabels } = UI;
-  const C = PDB.core, DB = PDB.db;
-  const LIBS = ['lib/schema.js', 'lib/core.js', 'lib/dom.js', 'lib/templates.js', 'lib/fill.js', 'lib/redact.js', 'content/agent.js'];
+  const C = PDB.core, DB = PDB.db, PT = PDB.pagetpl;
+  const LIBS = ['lib/schema.js', 'lib/core.js', 'lib/dom.js', 'lib/templates.js', 'lib/pagetpl.js', 'lib/fill.js', 'lib/redact.js', 'content/agent.js'];
   const MEDIA_LABEL = { image: 'Photo', audio: 'Audio', video: 'Video', screenshot: 'Screenshot' };
 
-  const st = { tab: null, source: '', path: '', captureTime: '', recs: [], regions: [], blobs: new Map(), broken: [], fill: null };
+  const st = { tab: null, source: '', path: '', captureTime: '', recs: [], regions: [], blobs: new Map(), broken: [], fill: null,
+    // page templates of the frames read: framePath → { fp, tpl, mode: 'strict'|'draft', partial, dirty, frameId, uncovered }
+    pages: new Map(), off: new Set(), learn: [], hot: null, pendingTime: null };
   // list search (per tab) and whether the page outlines are shown (remembered)
   const pref = { get: (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* not available */ } } };
   const ui = { q: { cap: '', fill: '' }, marks: pref.get('pdb.marks') !== 'off' };
@@ -38,17 +40,32 @@
   }
   const splitRef = (ref) => { const [f, r] = String(ref).split(':'); return { frameId: +f, ref: +r }; };
 
+  /** What a page scan needs: this site's page templates (with unsaved changes made here) and fields taught in Fill. */
   async function extractCtx() {
     const vocab = await DB.getVocab();
-    const all = await DB.getTemplates();
-    return { vocab, origin: st.source, templates: templatesFor(all, 'extract') };
+    const pageTemplates = (await DB.getPageTemplates()).filter((t) => t.origin === st.source);
+    for (const pg of st.pages.values()) {
+      const i = pageTemplates.findIndex((t) => t.framePath === pg.fp);
+      if (i >= 0) pageTemplates[i] = pg.tpl; else pageTemplates.push(pg.tpl);
+    }
+    const templates = (await DB.getTemplates()).filter((t) => t.origin === st.source && t.direction === 'fill');
+    return { vocab, origin: st.source, pageTemplates, templates };
   }
   /**
-   * Templates for this page, for Capture ('extract') or Fill ('fill'): this mode's templates of this page, plus the
-   * other mode's templates of this site (a field taught on the read-only page is found on the edit form, and back).
+   * Templates for a Fill scan: fields taught in Fill on this page, plus the fields of this site's page templates
+   * (a field taught on the read-only page is found on the edit form by the text before it).
    */
-  function templatesFor(all, use) {
-    return all.filter((t) => t.origin === st.source && (t.direction === use ? !t.path || st.path.startsWith(t.path) : true));
+  async function fillTemplates() {
+    const fill = (await DB.getTemplates()).filter((t) => t.origin === st.source && t.direction === 'fill' && (!t.path || st.path.startsWith(t.path)));
+    const pages = (await DB.getPageTemplates()).filter((t) => t.origin === st.source)
+      .map((t) => ({ id: t.id, origin: t.origin, framePath: t.framePath, direction: 'extract', fields: t.fields.filter((f) => f.label !== PT.IGNORE && f.role !== 'time') }));
+    return fill.concat(pages);
+  }
+  /** Read the page again (after a template change). */
+  async function rescan(msg) {
+    const results = await call(st.tab.id, 'scan', [await extractCtx()]);
+    await buildPreview(results);
+    if (msg) status(msg);
   }
 
   // ── capture ──────────────────────────────────────────────────────────
@@ -81,7 +98,7 @@
   $('#ai').onclick = () => run(async () => {
     if (!globalThis.AIFlow) throw new Error('AI extract is not available.');
     const tab = await prepare();
-    await AIFlow.run({ tab, st, call, status, onResult: (results) => buildPreview(results, { ai: true }) });
+    await AIFlow.run({ tab, st, call, status, onResult: (results) => onAI(results) });
   });
   $('#discard').onclick = () => resetCapture('Discarded. Nothing was saved.');
   $('#save').onclick = () => run(save);
@@ -101,6 +118,7 @@
     if (msg.type === 'pdb:picked') run(() => buildPreview([{ frameId: sender.frameId, result: msg.result }], { picked: true }));
     else if (msg.type === 'pdb:taught' && msg.mode === 'teach') run(() => onTaught(msg.field));
     else if (msg.type === 'pdb:taught' && msg.mode === 'fill') run(() => onFillTaught(msg.field));
+    else if (msg.type === 'pdb:taught' && msg.mode === 'time') run(() => onTimePicked(msg.field));
     else if (msg.type === 'pdb:media') run(() => addMedia(msg.media));
     else if (msg.type === 'pdb:badge') focusRow(`${sender.frameId}:${msg.ref}`);
     else if (msg.type === 'pdb:pickCancelled') { call(st.tab.id, 'stopPick').catch(() => {}); status('Cancelled.'); }
@@ -114,10 +132,19 @@
     const all = [];
     st.regions = []; st.broken = [];
     const foundLabels = new Set();
+    const fref = (frameId, x) => (x != null ? `${frameId}:${x}` : null);
     for (const { frameId, result } of results) {
+      const fp = result.framePath;
+      if (result.template) {
+        const pg = st.pages.get(fp) || { fp, dirty: false };
+        Object.assign(pg, { tpl: result.template, mode: result.mode, partial: !!result.partial, frameId, title: result.title,
+          uncovered: (result.uncovered || []).map((u) => ({ ...u, ref: fref(frameId, u.ref) })) });
+        if (result.changed) pg.dirty = true;
+        st.pages.set(fp, pg);
+      }
       for (const r of result.records) {
-        for (const it of r.items) { it.ref = it.ref != null ? `${frameId}:${it.ref}` : null; it.region = it.region != null ? `${frameId}:${it.region}` : null; }
-        for (const m of r.meds) { m.ref = m.ref != null ? `${frameId}:${m.ref}` : null; m.region = m.region != null ? `${frameId}:${m.region}` : null; }
+        for (const it of r.items) { it.ref = fref(frameId, it.ref); it.region = fref(frameId, it.region); it.timeRef = fref(frameId, it.timeRef); it.fp = result.template ? fp : null; }
+        for (const m of r.meds) { m.ref = fref(frameId, m.ref); m.region = fref(frameId, m.region); m.fp = result.template ? fp : null; }
         all.push(r);
       }
       for (const g of result.regions || []) if (g.ref != null) st.regions.push({ ...g, ref: `${frameId}:${g.ref}` });
@@ -135,10 +162,12 @@
         key: `${i}.${j}`, label: r.label, value: r.value, time: r.time, source: r.source,
         rawLabel: r._item.rawLabel || r.label, ref: r._item.ref || null, regionRef: r._item.region || null, warn: r._item.warn, unmapped: !!r._item.unmapped,
         how: r._item.how || (opts.ai ? 'ai' : null), conflictWith: r._conflictWith, on: true,
+        fid: r._item.fid || null, fids: (r._fids || [r._item.fid]).filter(Boolean), fp: r._item.fp || null, timeRef: r._item.timeRef || null,
       }));
       return { hints: rec.hints, skipped: rec.skipped, rows, pid: id.patientId || '', identity: id };
     }).concat(prev);
     for (const rec of st.recs) await refreshStatus(rec);
+    for (const rec of st.recs) for (const r of rec.rows) if (st.off.has(offKey(r))) r.on = false; // unticked before a re-read
     const n = st.recs.reduce((a, r) => a + r.rows.length, 0);
     if (!n) status(opts.picked ? 'Nothing recognisable in that part of the page. Try a larger region, or Teach the fields.' : 'No data recognised on this page. Try Pick region, Teach, or AI extract.', !n);
     else status(`${st.recs.length} patient${st.recs.length > 1 ? 's' : ''} · ${n} values found. Check them, then Save.`);
@@ -202,12 +231,276 @@
     if (field.anchor) await DB.learnAlias(field.anchor, label, { source: use });
     return label;
   }
+  /**
+   * AI extract → suggested changes to the page template (values are never saved from AI directly: the page is read
+   * by its template, so what is accepted here is read from the page itself, now and next time).
+   */
+  async function onAI(results) {
+    const items = results.flatMap((r) => r.result.records).flatMap((r) => r.items).map((it) => ({ label: it.label, value: it.value, raw: it.raw, text: it.text, time: it.time }));
+    if (!items.length) return status('Claude found no values on this page.');
+    if (!st.pages.size) await rescan();
+    status('Finding the values Claude read on the page…');
+    const res = await call(st.tab.id, 'locateValues', [items, await extractCtx()]);
+    const used = new Set(), sug = [];
+    for (const { result } of res) for (const s of result.found) { if (used.has(s.i)) continue; used.add(s.i); sug.push({ ...s, fp: result.framePath, item: items[s.i] }); }
+    const todo = sug.filter((s) => (s.kind !== 'same' || s.time) && st.pages.has(s.fp));
+    const same = sug.filter((s) => s.kind === 'same' && !s.time).length;
+    const missed = items.filter((_, i) => !used.has(i));
+    const where = (f) => (f && f.anchor ? ` at “${f.anchor.slice(0, 24)}”` : '');
+    const timeTxt = (s) => {
+      if (!s.time || PT.isPersistent(s.item.label)) return '';
+      const pg = st.pages.get(s.fp);
+      const f = s.time.fid && pg ? pg.tpl.fields.find((x) => x.id === s.time.fid) : null;
+      return ` · ⏱ ← ${f ? PT.fieldName(f) : (s.time.field && s.time.field.anchor) || 'a date on the page'}`;
+    };
+    const rows = todo.map((s) => ({ s, cb: h('input', { type: 'checkbox', checked: true }),
+      text: s.kind === 'add' ? `Add “${s.item.label}” = ${String(s.item.value).slice(0, 40)}${where(s.field)}${timeTxt(s)}`
+        : s.kind === 'relabel' ? `“${s.from}” → “${s.item.label}”${timeTxt(s)}` : `Time of “${s.item.label}”${timeTxt(s)}` }));
+    const res2 = await modal((f) => {
+      f.append(h('b', {}, 'Suggested changes to this page’s template'),
+        h('p', { class: 'small mut' }, `Claude read ${items.length} values. ${same} are already read by the template. Accepted changes are read from the page itself, now and every time.`),
+        rows.length ? h('div', { class: 'payload' }, rows.map((x) => h('label', { style: 'display:block' }, x.cb, ' ', x.text))) : h('p', {}, 'Nothing to change.'),
+        missed.length ? h('details', {}, h('summary', { class: 'small' }, `Not found on the page as one element (${missed.length}): not added`),
+          h('div', { class: 'small mut' }, missed.map((m) => h('div', {}, `${m.label} = ${String(m.value).slice(0, 40)}`)))) : null,
+        h('div', { class: 'btns' }, h('button', { value: '' }, 'Cancel'), h('button', { class: 'primary', value: 'ok', disabled: !rows.length }, 'Apply ticked')));
+    }, { wide: true });
+    if (res2 !== 'ok') return status('No template changes.');
+    let n = 0;
+    for (const { s, cb } of rows) {
+      if (!cb.checked) continue;
+      const pg = st.pages.get(s.fp);
+      let fid = s.fid;
+      if (s.kind === 'add') { const { value, framePath, ...f } = s.field; fid = PT.addField(pg.tpl, f, { label: s.item.label, from: 'ai' }).id; }
+      else if (s.kind === 'relabel') PT.setLabel(pg.tpl, s.fid, s.item.label);
+      const anchor = s.field ? s.field.anchor : null;
+      if (anchor && anchor.length <= 24) st.learn.push({ rawLabel: anchor, label: s.item.label, how: 'ai' });
+      if (s.time && !PT.isPersistent(s.item.label)) {
+        let tid = s.time.fid;
+        if (!tid) {
+          const { value, framePath, ...f } = s.time.field;
+          const ex = pg.tpl.fields.find((x) => x.selector === f.selector && !x.part && x.label !== PT.IGNORE);
+          tid = ex ? ex.id : PT.addField(pg.tpl, { ...f, role: 'time', label: C.cleanLabel(f.anchor || '') || 'time', rawLabel: f.anchor || '' }, { from: 'ai' }).id;
+        }
+        PT.setTime(pg.tpl, fid, { mode: 'field', field: tid });
+      }
+      pg.dirty = true; n++;
+    }
+    await rescan(n ? `Applied ${n} change${n > 1 ? 's' : ''} to the template. Check the rows, then Save.` : 'No template changes.');
+  }
+
+  /** Teach in Capture: the clicked element becomes a field of this page's template (or gets a new label). */
   async function onTaught(field) {
-    const label = await saveTaught(field, 'extract');
+    let pg = st.pages.get(field.framePath);
+    if (!pg) { await rescan(); pg = st.pages.get(field.framePath); }
+    if (!pg) throw new Error('This part of the page could not be read. Scan the page first.');
+    const what = field.kind === 'group' ? `the tick boxes “${field.anchor || ''}”` : `“${(field.anchor || field.value || 'this field').slice(0, 40)}”`;
+    const shown = field.value ? ` (now: ${field.value.slice(0, 40)})` : '';
+    const known = st.recs.flatMap((r) => (r.rows || []).map((x) => x.label));
+    const label = await chooseLabel(`Label for ${what}${shown}`, field.anchor, known);
     if (!label) return status('Cancelled.');
-    status(`Taught: ${field.anchor || 'this field'} → ${label} (used by Capture and Fill). Scanning again…`);
-    const results = await call(st.tab.id, 'scan', [await extractCtx()]);
-    await buildPreview(results);
+    const { value, framePath, ...f } = field;
+    // teaching a label the template already reads elsewhere (e.g. the right Name): replace the old field(s)
+    const others = PT.sameLabel(pg.tpl, label, f);
+    const replace = others.length && confirm(`This page's template already reads “${label}” from ${others.length > 1 ? `${others.length} other places` : 'another place'}${others[0].anchor ? ` (next to “${others[0].anchor.slice(0, 20)}”)` : ''}.\n\nOK: use only the place you just clicked.\nCancel: keep both.`);
+    if (replace) for (const o of others) PT.removeUnit(pg.tpl, o.id);
+    PT.addField(pg.tpl, f, { label, from: 'taught' });
+    pg.dirty = true;
+    if (field.anchor && field.anchor.length <= 24) await DB.learnAlias(field.anchor, label, { source: 'extract' });
+    await rescan(`Taught: ${field.anchor || 'this field'} → ${label}. It is part of this page's template now (kept when you Save).`);
+  }
+
+  /** ✕ on a row read by the page's template: leave that field out of the template (all fields the row stands for). */
+  function removeBtn(r) {
+    const pg = pageOf(r);
+    if (!pg || !r.fids || !r.fids.some((fid) => PT.unitOf(pg.tpl, fid))) return null;
+    return h('button', { class: 'link rm', type: 'button', title: 'Remove from this page’s template (not saved, not offered again). Undo in Dashboard → Mappings.',
+      onclick: () => run(async () => {
+        for (const fid of r.fids) PT.removeUnit(pg.tpl, fid);
+        pg.dirty = true;
+        await rescan(`Removed “${r.label}” from the template. Press Save or Save template to keep this.`);
+      }) }, '✕');
+  }
+
+  // ── time links ───────────────────────────────────────────────────────
+  const offKey = (r) => `${r.fid || r.key}|${r.time}|${r.value}`;
+  function setOn(r, on) { r.on = on; if (on) st.off.delete(offKey(r)); else st.off.add(offKey(r)); }
+  const pageOf = (r) => (r.fp != null ? st.pages.get(r.fp) : null);
+  /** The ⏱ chip of a row: where its time comes from. */
+  function timeChip(r) {
+    const pg = pageOf(r);
+    const u = pg && PT.unitOf(pg.tpl, r.fid);
+    if (!u) return null;
+    const tt = PT.timeText(pg.tpl, u.unit);
+    const fixed = u.unit.kind !== 'table' && PT.isPersistent(u.unit.label);
+    return h('button', { class: 'chip' + (tt.warn ? ' warn' : ''), type: 'button', disabled: fixed,
+      title: fixed ? 'Personal details have no time' : 'Where this value’s time comes from. Click to change.',
+      onmouseenter: () => { st.hot = r.key; paintOverlay(); if (r.timeRef) focusRef(r.timeRef); },
+      onmouseleave: () => { st.hot = null; paintOverlay(); },
+      onclick: () => run(() => editTime(pg, u.unit)) }, `⏱ ${tt.text}${tt.warn ? ' ⚠' : ''}`);
+  }
+  /** Dialog: how a field (or a table's rows) gets its time. */
+  async function editTime(pg, unit) {
+    const tpl = pg.tpl;
+    const cur = unit.time || { mode: 'capture' };
+    const curKey = cur.mode === 'field' ? `f:${cur.field}` : cur.mode === 'column' ? (unit.map && unit.map.layout === 'list' ? `col:${(cur.cols || []).join(',')}` : 'column') : cur.mode;
+    const opts = [['nan', 'Fixed: no time (the value does not change)'], ['capture', 'Capture time (when you press Scan)']];
+    if (unit.kind === 'table' && unit.map.layout === 'chart') opts.push(['column', 'Each column’s date (column headers)']);
+    if (unit.kind === 'table' && unit.map.layout === 'list') {
+      const cols = PT.timeColumns(unit);
+      for (const c of cols) opts.push([`col:${c.i}`, `Column “${c.header}”`]);
+      if (cols.length > 1) opts.push([`col:${cols.map((c) => c.i).join(',')}`, `Columns ${cols.map((c) => `“${c.header}”`).join(' + ')}`]);
+    }
+    // fields of this page holding a date: record dates, time fields, and fields whose value is a date
+    const dated = new Set(st.recs.flatMap((rec) => rec.rows).filter((r) => r.fp === pg.fp && r.fid && /^\d{4}-\d{2}-\d{2}/.test(r.value)).map((r) => r.fid));
+    for (const f of tpl.fields) if (f.role === 'recordDate' || f.role === 'time' || dated.has(f.id)) opts.push([`f:${f.id}`, f.id === unit.id ? 'Its own value (a date)' : `The date in “${PT.fieldName(f)}”`]);
+    opts.push(['pick', 'Pick the date on the page…']);
+    let chosen = curKey;
+    const res = await modal((form) => {
+      form.append(h('b', {}, `Time of “${unit.kind === 'table' ? 'the rows of this table' : PT.fieldName(unit)}”`),
+        h('div', { class: 'choices' }, opts.map(([v, t]) => h('label', {}, h('input', { type: 'radio', name: 'tl', value: v, checked: v === curKey, onchange: () => { chosen = v; } }), ' ', t))),
+        h('div', { class: 'btns' }, h('button', { value: '' }, 'Cancel'), h('button', { class: 'primary', value: 'ok' }, 'OK')));
+    });
+    if (res !== 'ok' || chosen === curKey) return;
+    if (chosen === 'pick') {
+      st.pendingTime = { fp: pg.fp, id: unit.id };
+      await call(st.tab.id, 'startPick', ['time', {}], [pg.frameId]);
+      return status('Click the date or time on the page that this value belongs to (Esc cancels).');
+    }
+    const link = chosen === 'nan' ? { mode: 'nan' } : chosen === 'capture' ? { mode: 'capture' } : chosen === 'column' ? { mode: 'column' }
+      : chosen.startsWith('col:') ? { mode: 'column', cols: chosen.slice(4).split(',').map(Number) } : { mode: 'field', field: chosen.slice(2) };
+    PT.setTime(tpl, unit.id, link);
+    pg.dirty = true;
+    await rescan(`Time changed: ${PT.timeText(tpl, unit).text}.`);
+  }
+  /** "Pick the date on the page": the clicked element becomes the time source (a time field if it is not a field yet). */
+  async function onTimePicked(field) {
+    const pt = st.pendingTime;
+    st.pendingTime = null;
+    if (!pt) return;
+    const pg = st.pages.get(pt.fp);
+    if (!pg || field.framePath !== pt.fp) throw new Error('Pick the date in the same part of the page (frame) as the value.');
+    const { value, framePath, ...f } = field;
+    let src = pg.tpl.fields.find((x) => x.selector === f.selector && !x.part && x.label !== PT.IGNORE);
+    if (!src) src = PT.addField(pg.tpl, { ...f, role: 'time', label: C.cleanLabel(f.anchor || '') || 'time', rawLabel: f.anchor || '' }, { from: 'taught' });
+    PT.setTime(pg.tpl, pt.id, { mode: 'field', field: src.id });
+    pg.dirty = true;
+    await rescan(`Time linked to “${PT.fieldName(src)}”${value ? ` (now: ${value.slice(0, 30)})` : ''}.`);
+  }
+
+  // ── the page template: banner, "not in the template" ─────────────────
+  function pageBanner(pg) {
+    const tpl = pg.tpl;
+    const n = tpl.fields.filter((f) => f.label !== PT.IGNORE && f.role !== 'time').length, m = tpl.tables.length;
+    const what = `${n} field${n === 1 ? '' : 's'}${m ? `, ${m} table${m === 1 ? '' : 's'}` : ''}`;
+    const where = st.pages.size > 1 ? h('span', { class: 'mono small mut' }, ` ${pg.fp || '/'}`) : null;
+    const text = pg.mode === 'draft'
+      ? (pg.partial ? `Older template completed from the built-in rules: ${what}. ` : `New page: draft template from the built-in rules, ${what}. `)
+        + 'It is saved when you press Save; rows you untick are left out of it.'
+      : `Read by this page’s template: ${what}. Only these are saved.${pg.dirty ? ' Changed — not saved yet.' : ''}`;
+    const saveT = pg.dirty || pg.mode === 'draft'
+      ? h('button', { class: 'link', onclick: () => run(async () => { const k = await savePageTemplates(false); status(k ? 'Template saved (no data saved).' : 'Nothing to save.'); render(); }) }, pg.mode === 'draft' ? 'Save template only' : 'Save template')
+      : null;
+    const unc = pg.uncovered && pg.uncovered.length
+      ? h('div', { class: 'unc' }, `${pg.uncovered.length} value${pg.uncovered.length > 1 ? 's' : ''} on this page ${pg.uncovered.length > 1 ? 'aren’t' : 'isn’t'} in the template. `,
+        h('button', { class: 'link', onclick: () => run(() => reviewUncovered(pg)) }, 'Review'))
+      : null;
+    return h('div', { class: 'pagebar' + (pg.mode === 'draft' ? ' draft' : '') }, h('div', {}, h('b', {}, pg.mode === 'draft' ? 'Draft template' : 'Template'), where, ' · ', text, ' ', saveT), unc);
+  }
+  async function reviewUncovered(pg) {
+    const items = pg.uncovered.map((u) => {
+      const isT = u.unit.kind === 'table';
+      const sel = isT ? null : h('select', {}, [u.unit.unmapped ? h('option', { value: u.unit.label }, `keep “${u.unit.label}”`) : h('option', { value: u.unit.label }, u.unit.label)]
+        .concat(vocabLabels().filter((l) => l !== u.unit.label).map((l) => h('option', { value: l }, l))));
+      return { u, sel, add: h('input', { type: 'checkbox', checked: true }) };
+    });
+    const res = await modal((f) => {
+      f.append(h('b', {}, 'Not in this page’s template'),
+        h('p', { class: 'small mut' }, 'Add the ones that should be saved from now on. Ignored ones are not offered again.'),
+        h('div', { class: 'payload' }, h('table', {}, h('tbody', {}, items.map((x) => h('tr', { onmouseenter: () => x.u.ref && focusRef(x.u.ref) },
+          h('td', {}, x.add), h('td', {}, x.sel || `Table · ${x.u.value}`), h('td', { class: 'small' }, x.sel ? String(x.u.value || '').slice(0, 60) : '')))))),
+        h('div', { class: 'btns' }, h('button', { value: '' }, 'Cancel'), h('button', { value: 'ignore' }, 'Ignore ticked'), h('button', { class: 'primary', value: 'add' }, 'Add ticked')));
+    }, { wide: true });
+    if (res !== 'add' && res !== 'ignore') return;
+    let k = 0;
+    for (const x of items) {
+      if (!x.add.checked) continue;
+      k++;
+      if (x.u.unit.kind === 'table') {
+        const t = JSON.parse(JSON.stringify(x.u.unit));
+        if (res === 'ignore') { for (const c of t.map.columns || []) c.off = true; for (const r of t.map.rows || []) r.off = true; }
+        PT.addTable(pg.tpl, t);
+      } else {
+        const label = res === 'ignore' ? PT.IGNORE : x.sel.value;
+        PT.addField(pg.tpl, x.u.unit, { label, from: label === x.u.unit.label ? 'rule' : 'taught' });
+      }
+    }
+    if (!k) return;
+    pg.dirty = true;
+    await rescan(res === 'add' ? `Added ${k} to the template. Press Save (or Save template) to keep it.` : `Ignored ${k}. Press Save (or Save template) to keep this.`);
+  }
+  /**
+   * Stylesheets the page could not read (another site's): fetched here (the extension may read them) and put in their
+   * places in the sample page, so it keeps the page's layout. @imports are followed two levels deep.
+   */
+  async function withExternalCss(html, external) {
+    const get = async (href, depth) => {
+      try {
+        const res = await fetch(href, { credentials: 'include' });
+        if (!res.ok) return '';
+        let css = await res.text();
+        if (depth > 0) {
+          const imports = [...css.matchAll(/@import\s+(?:url\()?\s*['"]?([^'")\s;]+)['"]?\s*\)?[^;]*;/g)];
+          for (const m of imports) css = css.replace(m[0], await get(new URL(m[1], href).href, depth - 1));
+        }
+        return css;
+      } catch (e) { return ''; }
+    };
+    for (const x of external) {
+      const css = PT.cleanCss(await get(x.href, 2)).replace(/<\/style/gi, '<\\/style');
+      html = html.replace(`<style data-pdb-ext="${x.i}"></style>`, () => `<style data-pdb-ext="${x.i}">${css}</style>`);
+    }
+    return html;
+  }
+  /**
+   * Save the page templates read in this capture, with a masked sample page each.
+   * A draft becomes the page's template (without the fields whose rows were unticked, when saving with data);
+   * a changed template is saved again.
+   */
+  async function savePageTemplates(withRows) {
+    let n = 0;
+    const ctx = await extractCtx();
+    for (const pg of st.pages.values()) {
+      const tpl = pg.tpl;
+      if (!tpl || (!tpl.fields.length && !tpl.tables.length)) continue;
+      const rows = st.recs.flatMap((rec) => rec.rows.filter((r) => r.fp === pg.fp));
+      if (pg.mode === 'draft') {
+        if (!rows.length) continue; // a frame with nothing on it
+        if (withRows) {
+          const linked = new Set([...tpl.fields, ...tpl.tables].map((u) => (u.time && u.time.mode === 'field' ? u.time.field : null)));
+          const byFid = new Map();
+          for (const r of rows) if (r.fid) { if (!byFid.has(r.fid)) byFid.set(r.fid, []); byFid.get(r.fid).push(r); }
+          const dropped = (f) => byFid.has(f.id) && byFid.get(f.id).every((r) => st.off.has(offKey(r)));
+          tpl.fields = tpl.fields.filter((f) => {
+            if (!dropped(f)) return true;
+            if (linked.has(f.id)) { f.role = 'time'; return true; } // still where other values take their time from
+            return false;
+          });
+        }
+      } else if (!pg.dirty && (await DB.getSample(tpl.id))) continue;
+      const t = { ...tpl, complete: true, updatedAt: Date.now() };
+      delete t._draft; delete t._partial;
+      await DB.savePageTemplate(t);
+      try {
+        const r = await call(st.tab.id, 'sample', [t, ctx], [pg.frameId]);
+        if (r[0] && r[0].result) {
+          const x = r[0].result;
+          await DB.putSample({ id: t.id, html: await withExternalCss(x.html, x.external || []), title: x.title, width: x.width, height: x.height });
+        }
+      } catch (e) { console.warn('sample page not saved', e); }
+      Object.assign(pg, { tpl: t, mode: 'strict', dirty: false });
+      n++;
+    }
+    return n;
   }
 
   /** Dialog: pick a vocabulary label or type a custom one. */
@@ -272,7 +565,13 @@
         reg.append(h('label', { onmouseenter: () => focusRef(g.ref) }, cb, ` ${g.kind === 'list' ? 'List' : g.kind === 'chart' ? 'Chart' : 'Table'} ${i + 1} · ${g.items}`));
       });
     }
-    if (st.broken.length) box.append(h('p', { class: 'status err' }, `Template fields not found on this page: ${st.broken.map((b) => b.label).join(', ')}. Use Teach to re-teach them.`));
+    const pages = $('#pages');
+    pages.textContent = '';
+    for (const pg of st.pages.values()) {
+      const used = st.recs.some((rec) => rec.rows.some((r) => r.fp === pg.fp)) || (pg.uncovered && pg.uncovered.length);
+      if (used && pg.tpl && (pg.tpl.fields.length || pg.tpl.tables.length || pg.uncovered.length)) pages.append(pageBanner(pg));
+    }
+    if (st.broken.length) box.append(h('p', { class: 'status err' }, `Template fields not found on this page: ${st.broken.map((b) => b.label).join(', ')}. Use Teach to teach them again (or remove them in Dashboard → Mappings).`));
     const patients = h('datalist', { id: 'knownPatients' });
     DB.patients().then((ps) => ps.forEach((p) => patients.append(h('option', { value: p.patientId }, p.name))));
     box.append(patients);
@@ -294,7 +593,7 @@
       if (ui.q.cap && !shown.length) return;
       for (const r of shown) tbody.append(rowEl(rec, r));
       // with a search, the header box ticks / unticks only the rows shown
-      const all = h('input', { type: 'checkbox', checked: shown.every((r) => r.on), onchange: () => { shown.forEach((r) => { r.on = all.checked; }); render(); paintOverlay(); } });
+      const all = h('input', { type: 'checkbox', checked: shown.every((r) => r.on), onchange: () => { shown.forEach((r) => setOn(r, all.checked)); render(); paintOverlay(); } });
       const tbl = h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, all), h('th', {}, 'Label'), h('th', {}, 'Value'), h('th', {}, 'Time'), h('th', {}, ''))), tbody);
       const sk = rec.skipped.length ? h('div', { class: 'skipped' }, `Skipped (${rec.skipped.length}): `, rec.skipped.map((s) => `${s.label} – ${s.reason}`).join('; ')) : null;
       box.append(h('div', { class: 'rec', 'data-rec': ri }, head, tbl, sk));
@@ -306,7 +605,7 @@
   }
 
   function rowEl(rec, r) {
-    const cb = h('input', { type: 'checkbox', checked: r.on, onchange: () => { r.on = cb.checked; tr.classList.toggle('off', !r.on); paintOverlay(); } });
+    const cb = h('input', { type: 'checkbox', checked: r.on, onchange: () => { setOn(r, cb.checked); tr.classList.toggle('off', !r.on); paintOverlay(); } });
     const val = r.media ? h('span', { class: 'mono' }, r.value.slice(0, 16) + '…')
       : h('input', { value: r.value, onchange: () => { r.value = val.value; refreshStatus(rec).then(() => { tr.replaceWith(rowEl(rec, r)); }); } });
     let labelCell;
@@ -314,9 +613,23 @@
       const opts = [h('option', { value: r.label }, r.label)];
       if (r.rawLabel && r.rawLabel !== r.label) opts.push(h('option', { value: '__raw__' }, `keep “${C.cleanLabel(r.rawLabel)}”`));
       for (const l of vocabLabels()) if (l !== r.label) opts.push(h('option', { value: l }, l));
-      opts.push(h('option', { value: '__ignore__' }, 'Ignore on this site'));
+      const pg = pageOf(r);
+      const inTpl = !!(pg && r.fid && PT.unitOf(pg.tpl, r.fid));
+      opts.push(h('option', { value: '__ignore__' }, inTpl ? 'Remove from template' : 'Ignore on this site'));
       const sel = h('select', {}, opts);
       sel.onchange = async () => {
+        if (inTpl) {
+          // a template field: the change goes into the page's template, and the page is read again
+          // a row can stand for several fields reading the same value: all of them change
+          if (sel.value === '__ignore__') for (const fid of r.fids) PT.removeUnit(pg.tpl, fid);
+          else {
+            const label = sel.value === '__raw__' ? C.cleanLabel(r.rawLabel) : sel.value;
+            for (const fid of r.fids) PT.setLabel(pg.tpl, fid, label);
+            if (sel.value !== '__raw__' && r.rawLabel) st.learn.push({ rawLabel: r.rawLabel, label, how: r.how });
+          }
+          pg.dirty = true;
+          return run(() => rescan(sel.value === '__ignore__' ? `Removed “${r.label}” from the template.` : `“${r.rawLabel || r.label}” is now ${sel.value === '__raw__' ? C.cleanLabel(r.rawLabel) : sel.value} in the template.`));
+        }
         if (sel.value === '__ignore__') { r.ignore = true; r.on = false; }
         else if (sel.value === '__raw__') { r.label = C.cleanLabel(r.rawLabel); r.userLabel = null; }
         else { r.userLabel = sel.value; r.label = sel.value; r.unmapped = false; }
@@ -328,13 +641,13 @@
     if (r.unmapped && !r.media) labelCell = makeSelect();
     else labelCell = h('span', { title: r.rawLabel && r.rawLabel !== r.label ? `on page: ${r.rawLabel}` : '', ondblclick: () => { labelCell.replaceWith(makeSelect()); } }, r.label);
     const tr = h('tr', { class: r.on ? '' : 'off', 'data-key': r.key, 'data-ref': r.ref || '', onmouseenter: () => r.ref && focusRef(r.ref) },
-      h('td', {}, cb), h('td', { class: 'l' }, labelCell), h('td', { class: 'v' }, val), h('td', { class: 'small mut' }, C.displayTime(r.time)), h('td', {}, statusBadge(r)));
+      h('td', {}, cb), h('td', { class: 'l' }, labelCell), h('td', { class: 'v' }, val), h('td', { class: 'small mut t' }, C.displayTime(r.time), timeChip(r)), h('td', { class: 'b' }, statusBadge(r), removeBtn(r)));
     return tr;
   }
 
   function toggleRegion(g) {
     // rows read from this region's table
-    for (const rec of st.recs) for (const r of rec.rows) if (r.ref && r.regionRef === g.ref) r.on = g.on !== false;
+    for (const rec of st.recs) for (const r of rec.rows) if (r.ref && r.regionRef === g.ref) setOn(r, g.on !== false);
     render(); paintOverlay();
   }
 
@@ -350,7 +663,11 @@
       if (!r.ref || !rowHit(r)) continue;
       const kind = !r.on ? 'off' : r.warn ? 'warn' : r.unmapped ? 'unmapped' : 'mapped';
       add(r.ref, { kind, text: r.unmapped ? `? ${C.cleanLabel(r.rawLabel)}` : `${r.label} ✓`, key: r.key, title: `${r.label}: ${r.value}` });
+      // hovering a ⏱ chip: where this value's time is read from
+      if (st.hot === r.key && r.timeRef) add(r.timeRef, { kind: 'time', text: `⏱ time of ${r.label}`, key: r.key });
     }
+    // values the rules see that the template does not cover
+    if (!ui.q.cap) for (const pg of st.pages.values()) for (const u of pg.uncovered || []) if (u.ref) add(u.ref, { kind: 'unmapped', text: `+ not in template: ${u.unit.label || ''}`, key: 'unc' });
     chrome.scripting.executeScript({ target: { tabId: st.tab.id, allFrames: true }, func: () => window.__pdbAgent && window.__pdbAgent.clearOverlay() }).then(() => {
       for (const [frameId, marks] of byFrame) call(st.tab.id, 'setMarks', [marks], [frameId]).catch(() => {});
     }).catch(() => {});
@@ -363,6 +680,7 @@
 
   function resetCapture(msg) {
     st.recs = []; st.regions = []; st.blobs.clear(); st.broken = [];
+    st.pages.clear(); st.off.clear(); st.learn = []; st.hot = null; st.pendingTime = null;
     render();
     if (st.tab) chrome.scripting.executeScript({ target: { tabId: st.tab.id, allFrames: true }, func: () => window.__pdbAgent && window.__pdbAgent.clearOverlay() }).catch(() => {});
     if (msg) status(msg);
@@ -383,12 +701,15 @@
       if (r.ignore) await DB.learnAlias(r.rawLabel, '__ignore__', { site: st.source, source: 'extract' });
       else if (r.userLabel && r.rawLabel) await DB.learnAlias(r.rawLabel, r.userLabel, { site: global ? null : st.source, source: r.how === 'ai' ? 'ai' : 'extract' });
     }
+    // labels chosen for template fields also help the drafts of other pages
+    for (const l of st.learn) await DB.learnAlias(l.rawLabel, l.label, { site: global ? null : st.source, source: l.how === 'ai' ? 'ai' : 'extract' });
     if (!out.length) return status('Nothing ticked to save.', true);
     for (const r of out) if (st.blobs.has(r.value)) { const b = st.blobs.get(r.value); await DB.putBlob(b.blob, { name: b.name }); }
     await DB.putRows(out);
+    const tpls = await savePageTemplates(true);
     const pts = new Set(out.map((r) => r.patientId)).size;
     resetCapture();
-    status(`Saved ${out.length} values for ${pts} patient${pts > 1 ? 's' : ''}.`);
+    status(`Saved ${out.length} values for ${pts} patient${pts > 1 ? 's' : ''}.${tpls ? ` Page template${tpls > 1 ? 's' : ''} saved: the page${tpls > 1 ? 's are' : ' is'} read by ${tpls > 1 ? 'them' : 'it'} from now on.` : ''}`);
   }
 
   // ── fill ─────────────────────────────────────────────────────────────
@@ -424,7 +745,7 @@
     const rows = await DB.rowsByPatient(pid);
     const fillData = fillDataFrom(rows, $('#fillTime').value || null);
     const vocab = await DB.getVocab();
-    const templates = templatesFor(await DB.getTemplates(), 'fill');
+    const templates = await fillTemplates();
     const res = await call(tab.id, 'fillScan', [fillData, { vocab, origin: st.source, templates }]);
     const props = [];
     for (const { frameId, result } of res) for (const p of result) props.push({ ...p, frameId, on: p.matched && (!p.hasValue || $('#fillOverwrite').checked) });

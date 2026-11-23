@@ -259,7 +259,7 @@
     for (const rec of recs) {
       const id = C.resolveIdentity(rec.hints, source, ix);
       const pid = id.patientId || (fixedPidInput && fixedPidInput.value.trim()) || (id.suggestions[0] && id.suggestions[0].patientId) || '';
-      const rr = C.recordToRows(rec, { source, captureTime: now }).map(({ _item, _conflictWith, ...x }) => ({ ...x, patientId: pid }));
+      const rr = C.recordToRows(rec, { source, captureTime: now }).map(({ _item, _conflictWith, _fids, ...x }) => ({ ...x, patientId: pid }));
       if (!pid) unassigned.push(rec); else rows.push(...rr);
     }
     const diff = C.diffRows(rows, await DB.existingFor(rows));
@@ -281,7 +281,11 @@
   }
 
   // ── mappings ─────────────────────────────────────────────────────────
+  const PT = PDB.pagetpl;
+  const g_chrome = () => (globalThis.chrome || {});
+  let openTpl = null; // id of the page template shown in detail
   async function renderMappings() {
+    await renderPageTemplates();
     const v = await DB.getVocab();
     const box = $('#aliases');
     box.textContent = '';
@@ -298,19 +302,54 @@
     const t = await DB.getTemplates();
     const tb = $('#templates');
     tb.textContent = '';
-    if (!t.length) tb.append(h('p', { class: 'mut' }, 'None yet. Use Teach (capture) or Teach field (fill) in the side panel.'));
-    else tb.append(h('table', {}, h('thead', {}, h('tr', {}, ['Site', 'Page', 'Direction', 'Fields', ''].map((x) => h('th', {}, x)))),
-      h('tbody', {}, t.map((x, i) => h('tr', {}, h('td', {}, x.origin), h('td', { class: 'mono small' }, x.path || '*'), h('td', {}, x.direction), h('td', { class: 'small' }, x.fields.map((f) => `${f.anchor || '…'} → ${f.label}`).join('; ')),
+    if (!t.length) tb.append(h('p', { class: 'mut' }, 'None yet. Use Teach in the side panel’s Fill tab for a form field it could not match.'));
+    else tb.append(h('table', {}, h('thead', {}, h('tr', {}, ['Site', 'Page', 'Fields', ''].map((x) => h('th', {}, x)))),
+      h('tbody', {}, t.map((x, i) => h('tr', {}, h('td', {}, x.origin), h('td', { class: 'mono small' }, x.framePath || x.path || '*'),
+        h('td', { class: 'small' }, x.fields.map((f) => h('div', {}, `${f.anchor || '(no label text)'} → ${f.label}`))),
         h('td', {}, h('button', { class: 'link danger', onclick: async () => { t.splice(i, 1); await DB.saveTemplates(t); renderMappings(); } }, 'delete')))))));
   }
-  $('#mapExport').onclick = async () => download('personal-db-mappings.json', new Blob([JSON.stringify({ format: 'personal-db-mappings', vocab: await DB.getVocab(), templates: await DB.getTemplates() }, null, 1)], { type: 'application/json' }));
+
+  async function renderPageTemplates(withDetail = true) {
+    const list = await DB.getPageTemplates();
+    const box = $('#ptList');
+    box.textContent = '';
+    if (!list.length) { box.append(h('p', { class: 'mut' }, 'None yet. Scan a page in the side panel and press Save: its template is saved with the data.')); $('#ptDetail').textContent = ''; return; }
+    const count = (t) => t.fields.filter((f) => f.label !== PT.IGNORE && f.role !== 'time').length;
+    box.append(h('table', { class: 'plist' }, h('thead', {}, h('tr', {}, ['Site', 'Page', 'Title', 'Fields', 'Tables', '', 'Updated', ''].map((x) => h('th', {}, x)))),
+      h('tbody', {}, list.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).map((t) => h('tr', { class: t.id === openTpl ? 'sel' : '', onclick: () => { openTpl = t.id; renderPageTemplates(); } },
+        h('td', {}, t.origin), h('td', { class: 'mono small' }, t.framePath || '/'), h('td', { class: 'small' }, t.title || ''),
+        h('td', {}, count(t)), h('td', {}, t.tables.length),
+        h('td', {}, t.complete ? h('span', { class: 'badge new' }, 'full') : h('span', { class: 'badge map', title: 'An older template with taught fields only: completed the next time you save this page' }, 'taught fields only')),
+        h('td', { class: 'small mut' }, t.updatedAt ? new Date(t.updatedAt).toLocaleString() : ''),
+        h('td', {}, h('button', { class: 'link danger', onclick: async (e) => {
+          e.stopPropagation();
+          if (!confirm(`Delete the template of ${t.origin}${t.framePath}? The page will get a new draft from the built-in rules next time.`)) return;
+          await DB.deletePageTemplate(t.id); if (openTpl === t.id) openTpl = null; renderPageTemplates();
+        } }, 'delete')))))));
+    if (!withDetail) return;
+    const t = list.find((x) => x.id === openTpl);
+    if (t) await TplView.render($('#ptDetail'), t, { zoom: 'fit', onSaved: () => { ownSave = Date.now(); return renderPageTemplates(false); } });
+    else $('#ptDetail').textContent = '';
+  }
+  // a template changed in the side panel: show the new version
+  let ownSave = 0;
+  if (g_chrome().storage && chrome.storage.onChanged) chrome.storage.onChanged.addListener((ch, area) => {
+    if (area === 'local' && ch.pageTemplates && Date.now() - ownSave > 1500 && $('#v-mappings').classList.contains('on')) renderPageTemplates();
+  });
+
+  $('#mapExport').onclick = async () => download('personal-db-mappings.json', new Blob([JSON.stringify({ format: 'personal-db-mappings', vocab: await DB.getVocab(), templates: await DB.getTemplates(),
+    pageTemplates: await DB.getPageTemplates(), samples: await DB.allSamples() }, null, 1)], { type: 'application/json' }));
   $('#mapImport').onchange = async (e) => {
     const j = JSON.parse(await e.target.files[0].text());
     if (j.format !== 'personal-db-mappings') return alert('Not a Personal DB mappings file.');
     const v = await DB.getVocab();
     await DB.set('vocab', { aliases: { ...v.aliases, ...(j.vocab?.aliases || {}) } });
     const t = await DB.getTemplates(); const ids = new Set(t.map((x) => x.id));
-    await DB.saveTemplates(t.concat((j.templates || []).filter((x) => !ids.has(x.id))));
+    const incoming = j.templates || [];
+    // older files: Capture templates become page templates (taught fields only)
+    const old = incoming.filter((x) => (x.direction || 'extract') === 'extract');
+    await DB.saveTemplates(t.concat(incoming.filter((x) => x.direction === 'fill' && !ids.has(x.id))));
+    await PDB.backup.restoreMappings({ pageTemplates: (j.pageTemplates || []).concat(DB.migrateTemplates(old)), samples: j.samples || [] }, 'merge');
     renderMappings();
   };
 

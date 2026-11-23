@@ -46,10 +46,14 @@
 
     <section id="v-mappings" class="view">
       <h2>Mappings</h2>
-      <p class="mut">Learned labels are shared by Capture and Fill. Templates point at elements on one site.</p>
+      <p class="mut">Each page has one template that says which values are read, under which label, and where each value's time comes from. The built-in rules make the first draft when you save a page; after that the page is read by its template only.</p>
+      <h3>Page templates</h3>
+      <div id="ptList"></div>
+      <div id="ptDetail"></div>
       <h3>Learned labels</h3>
+      <p class="mut small">Used for the first draft of a new page's template, and by Fill.</p>
       <div id="aliases"></div>
-      <h3>Templates</h3>
+      <h3>Fill templates</h3>
       <div id="templates"></div>
       <div class="row"><button id="mapExport">Export mappings</button> <label class="btnlike">Import mappings <input type="file" id="mapImport" accept=".json" hidden></label></div>
     </section>
@@ -70,12 +74,16 @@
   <script src="../lib/core.js"></script>
   <script src="../lib/db.js"></script>
   <script src="../lib/dom.js"></script>
+  <script src="../lib/templates.js"></script>
+  <script src="../lib/redact.js"></script>
+  <script src="../lib/pagetpl.js"></script>
   <script src="../lib/zip.js"></script>
   <script src="../lib/crypto.js"></script>
   <script src="../lib/export.js"></script>
   <script src="../lib/backup.js"></script>
   <script src="../vendor/xlsx.js"></script>
   <script src="../ui/common.js"></script>
+  <script src="../ui/tplview.js"></script>
   <script src="chart.js"></script>
   <script src="dashboard.js"></script>
 </body>

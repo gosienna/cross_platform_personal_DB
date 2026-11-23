@@ -22,8 +22,8 @@
             rows: {
               type: 'array',
               items: {
-                type: 'object', additionalProperties: false, required: ['label', 'value', 'time'],
-                properties: { label: { type: 'string' }, value: { type: 'string' }, time: { type: 'string' } },
+                type: 'object', additionalProperties: false, required: ['label', 'value', 'text', 'time'],
+                properties: { label: { type: 'string' }, value: { type: 'string' }, text: { type: 'string' }, time: { type: 'string' } },
               },
             },
           },
@@ -41,6 +41,7 @@
       `For each data point return a row with "label", "value" and "time". Use these canonical labels when they fit: ${labels}. For anything else use the label as written on the page.`,
       'Values: dates as YYYY-MM-DD; sex as male/female/other; numbers without units, converted to the unit shown in brackets; blood pressure as "systolic/diastolic"; blood glucose with a meal-time tag as label "Blood glucose (AC)" / "(PC)" / "(HS)".',
       'Medication: one row per medication, label "Medication", value "drug strength; dose; frequency; route; days; start~end; hospital dept; doctor" (leave out parts that are missing), time = start date.',
+      'text: the value exactly as it is written on the page (copied character for character, placeholders as they appear), so it can be found on the page again.',
       'time: "nan" for labels marked [persistent]; otherwise the measurement/record time as "YYYY-MM-DD HH:mm" (or "YYYY-MM-DD"), in the page\'s local time; "" if the page gives no time.',
       'Skip readings whose only time is relative (e.g. "4小時前"). Skip menus, buttons, staff schedules and page chrome. Do not invent data.',
     ].join('\n');
@@ -67,7 +68,7 @@
         else if (time) { const pt = C.parseDateTime(time); t = pt && pt.kind !== 'relative' ? C.formatTime(pt) : null; }
         let v = value, warn;
         if (entry && label !== 'Medication') { const n = C.normalizeValue(entry, value); if (!n) continue; v = n.value; warn = n.warn; }
-        out.items.push({ label: label.startsWith('Blood glucose') ? label : label, value: v, time: t, rawLabel: row.label, raw: value, warn, how: 'ai', ref: null });
+        out.items.push({ label, value: v, time: t, rawLabel: row.label, raw: value, text: R.reidentify(row.text || row.value || '', map), warn, how: 'ai', ref: null });
         if (entry && entry.identity && !out.hints[entry.identity] && v) out.hints[entry.identity] = v;
       }
       return out;

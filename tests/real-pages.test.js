@@ -7,6 +7,7 @@ const path = require('node:path');
 const { docFrom, capture, ROOT } = require('./helpers/load.js');
 
 const D = path.join(ROOT, 'tests', 'data');
+const D_DIR = D;
 const has = fs.existsSync(D);
 const page = (name) => {
   const f = fs.readdirSync(D, { recursive: true }).find((x) => String(x).endsWith(name));
@@ -113,4 +114,23 @@ test('real: portal assessment — tick-box picture groups stored', { skip: !has 
   const l = labels(records[0]);
   assert.ok(l.has('意識狀態'));
   assert.ok(l.has('近期治療') || [...l].some((x) => x.startsWith('建議')), 'a tick-box list section');
+});
+
+// A page read by its draft template gives the same rows as the rules. Only counts are reported (no values).
+test('real: every saved page reads the same through its draft template', { skip: !has }, () => {
+  const { PDB } = require('./helpers/load.js');
+  const D = PDB.dom, C = PDB.core, PT = PDB.pagetpl;
+  const ctx = { origin: 'https://real.example', refYear: 2026, refDate: { y: 2026, m: 11, d: 23 } };
+  const lines = (records) => C.mergeRecords(records).flatMap((r) => C.recordToRows(r, { source: 'x', captureTime: '202611230600' }).map((x) => `${x.label}␟${x.value}␟${x.time}`)).sort();
+  const files = fs.readdirSync(D_DIR, { recursive: true }).map(String).filter((f) => f.endsWith('.html') && !f.includes('_files'));
+  assert.ok(files.length);
+  for (const f of files) {
+    const doc = docFrom(path.join(D_DIR, f));
+    const rules = D.extractFromRoot(doc, { ...ctx, registry: D.makeRegistry(), templates: [] });
+    const tpl = JSON.parse(JSON.stringify(PT.draft(doc, rules, { origin: ctx.origin, framePath: '/p' })));
+    const a = lines(rules.records), b = lines(PT.extract(doc, tpl, { ...ctx, registry: D.makeRegistry() }).records);
+    const missing = a.filter((x) => !b.includes(x)), extra = b.filter((x) => !a.includes(x));
+    const labelsOf = (xs) => [...new Set(xs.map((x) => x.split('␟')[0]))].join(', ');
+    assert.ok(!missing.length && !extra.length, `${path.basename(f).slice(-30)}: ${missing.length} rows missing (${labelsOf(missing)}), ${extra.length} extra (${labelsOf(extra)})`);
+  }
 });

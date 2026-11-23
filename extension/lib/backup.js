@@ -25,7 +25,8 @@
       settings: () => PDB.db.getSettings(),
       saveSettings: (p) => PDB.db.saveSettings(p),
       meta: () => PDB.db.get('meta', {}),
-      snapshot: async () => ({ format: 'personal-db-backup', version: 1, createdAt: new Date().toISOString(), rows: await PDB.db.allRows(), vocab: await PDB.db.getVocab(), templates: await PDB.db.getTemplates(), blobs: await PDB.db.allBlobMeta() }),
+      snapshot: async () => ({ format: 'personal-db-backup', version: 1, createdAt: new Date().toISOString(), rows: await PDB.db.allRows(), vocab: await PDB.db.getVocab(), templates: await PDB.db.getTemplates(),
+        pageTemplates: await PDB.db.getPageTemplates(), samples: await PDB.db.allSamples(), blobs: await PDB.db.allBlobMeta() }),
       blob: (id) => PDB.db.getBlob(id),
       restoreData: async (snap, mode) => {
         if (mode === 'replace') await PDB.db.clearAll();
@@ -34,11 +35,28 @@
         await PDB.db.set('vocab', { aliases: { ...(mode === 'replace' ? {} : v.aliases), ...(snap.vocab?.aliases || {}) } });
         if (mode === 'replace') await PDB.db.saveTemplates(snap.templates || []);
         else { const t = await PDB.db.getTemplates(); const ids = new Set(t.map((x) => x.id)); await PDB.db.saveTemplates(t.concat((snap.templates || []).filter((x) => !ids.has(x.id)))); }
+        await restoreMappings(snap, mode);
       },
       hasBlob: async (id) => !!(await PDB.db.getBlob(id)),
       putBlob: (blob, meta) => PDB.db.putBlob(blob, meta),
       now: () => Date.now(),
     };
+  }
+
+  /**
+   * Page templates and their (masked) sample pages from a backup or a mappings file.
+   * replace: the backup's templates only; merge: a page's newer template wins.
+   */
+  async function restoreMappings(snap, mode) {
+    if (!snap.pageTemplates) return;
+    const mine = mode === 'replace' ? [] : await PDB.db.getPageTemplates();
+    const key = (t) => `${t.origin}|${t.framePath}`;
+    const by = new Map(mine.map((t) => [key(t), t]));
+    for (const t of snap.pageTemplates) { const cur = by.get(key(t)); if (!cur || (t.updatedAt || 0) > (cur.updatedAt || 0)) by.set(key(t), t); }
+    const list = [...by.values()];
+    await PDB.db.savePageTemplates(list);
+    const ids = new Set(list.map((t) => t.id));
+    for (const s of snap.samples || []) if (ids.has(s.id)) await PDB.db.putSample(s);
   }
 
   // ── Drive REST ───────────────────────────────────────────────────────
@@ -187,5 +205,5 @@
     return { rows: snap.rows.length, restoredBlobs: restored, missingBlobs: missing };
   }
 
-  PDB.backup = { run, runIfDue, isDue, listBackups, restore, stampName, INTERVAL, FOLDER };
+  PDB.backup = { restoreMappings, run, runIfDue, isDue, listBackups, restore, stampName, INTERVAL, FOLDER };
 })(globalThis);

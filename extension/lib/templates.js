@@ -1,5 +1,5 @@
 /*
- * Per-site element templates ("teach mode").
+ * Finding a field again on a page (used by page templates, see pagetpl.js, and by fields taught in Fill).
  *   template = { id, origin, path, framePath?, direction: 'extract'|'fill', fields: [{ kind, selector, anchor, context, tag, label }] }
  *   field.kind = 'group' (a tick-box / radio group, found by its first option) | 'control' (a form box) | 'text' (a value on a page)
  *   field.context = up to 3 nearest text pieces before the element (numbering and notes removed), field.tag = its tag;
@@ -37,17 +37,20 @@
     return parts.join(' > ');
   }
 
-  /** Nearby label text used to find the element again if the selector breaks. */
+  /**
+   * Nearby label text used to find the element again if the selector breaks: the whole text of the label cell or
+   * element before it (never cut in the middle). Long texts (> 60 characters) are no anchor; the context is used instead.
+   */
   function anchorFor(el) {
     const isCtl = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
     if (isCtl) { const c = D().labelCandidates(el); if (c.length) return c[0]; }
+    const short = (t) => (t && t.length <= 60 ? t : null);
     const cell = el.closest && el.closest('td,th');
-    if (cell) { let p = cell.previousElementSibling; while (p && !D().textOf(p)) p = p.previousElementSibling; if (p) return D().textOf(p).slice(0, 30); }
+    if (cell) { let p = cell.previousElementSibling; while (p && !D().textOf(p)) p = p.previousElementSibling; if (p) return short(D().textOf(p)); }
     let sib = el.previousElementSibling;
     while (sib && !D().textOf(sib)) sib = sib.previousElementSibling;
-    if (sib) return D().textOf(sib).slice(0, 30);
-    const pt = D().precedingText(el, 40).trim();
-    return pt.slice(-30);
+    if (sib) return short(D().textOf(sib));
+    return short(walkOne(el).last);
   }
 
   const norm = (s) => PDB.core.clean(s).replace(/[*＊:：\s]/g, '');
@@ -62,32 +65,59 @@
     return s.slice(0, 24);
   }
   const ctxMatch = (a, b) => a && b && (a === b || (Math.min(a.length, b.length) >= 4 && (a.startsWith(b) || b.startsWith(a))));
+  // a placeholder in a saved sample page ("[Name]") is not page text
+  const PLACEHOLDER = /^\s*\[[^\[\]]{1,40}\]\s*$/;
   /**
-   * Walk the document once; for every element accepted by `want`, record the last `n` text pieces before it.
-   * Returns [{ el, ctx: [farthest … nearest] }].
+   * Walk the document once; for every element accepted by `want`, record the last `n` text pieces before it
+   * (and the last whole text before it, for anchors). Returns [{ el, ctx: [farthest … nearest], last }].
    */
-  function contexts(doc, want, n = 3) {
+  function walkContexts(doc, want, n = 3) {
     const body = doc.body || doc.documentElement;
     const out = [];
     const recent = [];
+    let last = '';
     const w = doc.createTreeWalker(body, 1 | 4);
     for (let node = w.currentNode; node; node = w.nextNode()) {
       if (node.nodeType === 1) {
-        if (want(node)) out.push({ el: node, ctx: recent.slice(-n) });
+        if (want(node)) out.push({ el: node, ctx: recent.slice(-n), last });
       } else {
         const p = node.parentElement;
         if (!p || SKIP_CTX.test(p.tagName) || p.closest('select,script,style,#' + D().OVERLAY_ID)) continue;
+        if (PLACEHOLDER.test(node.nodeValue)) continue;
+        const raw = PDB.core.clean(node.nodeValue);
+        if (raw) last = raw;
         const k = ctxKey(node.nodeValue);
         if (k.length >= 2 && recent[recent.length - 1] !== k) { recent.push(k); if (recent.length > 8) recent.shift(); }
       }
     }
     return out;
   }
-  /** Context of one element (for teaching). */
-  function contextFor(el) {
-    const hit = contexts(el.ownerDocument, (x) => x === el);
-    return hit.length ? hit[0].ctx : [];
+  /*
+   * While a page is read (session), the contexts of all elements are found in one walk and reused,
+   * instead of one walk per field.
+   */
+  let cache = null;
+  function session(doc, fn) {
+    const prev = cache;
+    cache = { doc, all: null, byEl: null };
+    try { return fn(); } finally { cache = prev; }
   }
+  function cached(doc) {
+    if (!cache || cache.doc !== doc) return null;
+    if (!cache.all) { cache.all = walkContexts(doc, () => true); cache.byEl = new Map(cache.all.map((x) => [x.el, x])); }
+    return cache;
+  }
+  function contexts(doc, want) {
+    const c = cached(doc);
+    return c ? c.all.filter((x) => want(x.el)) : walkContexts(doc, want);
+  }
+  function walkOne(el) {
+    const c = cached(el.ownerDocument);
+    if (c) return c.byEl.get(el) || { ctx: [], last: '' };
+    return walkContexts(el.ownerDocument, (x) => x === el)[0] || { ctx: [], last: '' };
+  }
+  /** Context of one element (for teaching). */
+  const contextFor = (el) => walkOne(el).ctx;
   /** How well a stored context matches a candidate's (nearest pieces weigh most). */
   function ctxScore(stored, cand) {
     let score = 0;
@@ -220,7 +250,7 @@
         if (seenEls.has(g.container) || g.opts.every((o) => D().isHidden(o))) return;
         seenEls.add(g.container);
         const value = D().groupValue({ ...g, label: f.label });
-        if (value) pairs.push({ label: f.label, value, ref: reg ? reg.id(g.container) : null, src: 'template', how: p.how });
+        if (value) pairs.push({ label: f.label, value, ref: reg ? reg.id(g.container) : null, src: 'template', opt: reg ? reg.id(g.opts[0]) : null, how: p.how });
         return;
       }
       const el = p.el;
@@ -251,5 +281,5 @@
     return { pairs, broken, found };
   }
 
-  PDB.templates = { selectorFor, anchorFor, findByAnchor, locate, place, kindOf, forPage, applyExtract, pagePath, appliesTo, contextFor, findByContext, ctxKey };
+  PDB.templates = { selectorFor, anchorFor, findByAnchor, locate, place, kindOf, forPage, applyExtract, pagePath, appliesTo, contextFor, findByContext, ctxKey, session, wantFor };
 })(globalThis);

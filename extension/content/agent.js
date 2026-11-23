@@ -33,6 +33,7 @@
       .mapped .t{background:#1a9e5a}.unmapped .t{background:#c48a00}.chart .t{background:#2f6fd6}.warn .t{background:#d33}.off .t{background:#888}
       .fill .t{background:#7b4fd6}.keep .t{background:#888}.filled .t{background:#1a9e5a}
       .pick{border-color:#ff3d7f;border-width:2px;background:rgba(255,61,127,.08)}
+      .time{border-color:#2f6fd6;border-style:dashed;border-width:2px;background:rgba(47,111,214,.08)} .time .t{background:#2f6fd6}
       .tip{position:fixed;right:12px;bottom:12px;font:13px system-ui;background:#222;color:#fff;padding:8px 12px;border-radius:6px;pointer-events:none}
     </style><div class="layer"></div>`;
     layer = shadow.querySelector('.layer');
@@ -81,11 +82,43 @@
       meds: r.meds.map((m) => ({ ...m })),
     }));
   }
+  /**
+   * Read this frame. With a saved template the page is read strictly by it, and what the rules find outside it is
+   * listed as "not in the template". Without one, the built-in rules make a draft template (with fields taught
+   * earlier, if any), and the page is read by that draft — exactly as it will be read once saved.
+   */
   function scan(ctx) {
     clearOverlay();
+    const T = PDB.templates, PT = PDB.pagetpl;
+    const framePath = T.pagePath(location.pathname);
+    const base = { url: location.href, title: document.title, top: window === window.top, framePath, found: [] };
+    const tpl = (ctx.pageTemplates || []).find((t) => t.framePath === framePath && (!ctx.origin || t.origin === ctx.origin));
+    if (tpl && (tpl.complete || tpl._draft)) {
+      reg = PDB.dom.makeRegistry();
+      const res = PT.extract(document, tpl, { ...ctx, registry: reg });
+      const unc = tpl._draft ? [] : PT.uncovered(document, tpl, res, { ...ctx, templates: [] });
+      return { ...base, mode: tpl._draft ? 'draft' : 'strict', partial: !!tpl._partial, template: tpl, changed: res.changed,
+        records: serialise(res.records), regions: res.regions, broken: res.broken, uncovered: unc };
+    }
     reg = PDB.dom.makeRegistry();
-    const ex = PDB.dom.extractFromRoot(document, { ...ctx, registry: reg });
-    return { records: serialise(ex.records), regions: ex.regions, broken: ex.broken, found: ex.found || [], url: location.href, title: document.title, top: window === window.top };
+    const legacy = tpl ? [{ direction: 'extract', framePath, fields: tpl.fields.filter((f) => f.label !== PT.IGNORE) }] : [];
+    const rules = PDB.dom.extractFromRoot(document, { ...ctx, registry: reg, templates: legacy.concat(ctx.templates || []) });
+    const d = PT.draft(document, rules, { origin: ctx.origin, framePath, title: document.title, base: tpl });
+    d._draft = true;
+    if (tpl) d._partial = true;
+    reg = PDB.dom.makeRegistry();
+    const res = PT.extract(document, d, { ...ctx, registry: reg });
+    return { ...base, mode: 'draft', partial: !!tpl, template: d, records: serialise(res.records), regions: res.regions, broken: [], uncovered: [] };
+  }
+  /** The masked sample page of this frame for a template. */
+  function sample(tpl, ctx) {
+    clearOverlay();
+    const r = PDB.dom.makeRegistry();
+    const res = PDB.pagetpl.extract(document, tpl, { ...ctx, registry: r });
+    const out = {};
+    const html = PDB.pagetpl.snapshot(document, tpl, res, out);
+    return { html, external: out.external || [], framePath: PDB.templates.pagePath(location.pathname), title: document.title,
+      width: document.documentElement.clientWidth || 1200, height: window.innerHeight || 0 };
   }
   function extractElement(el, ctx) {
     reg = PDB.dom.makeRegistry();
@@ -110,23 +143,14 @@
     if (ctl && !/^(hidden|button|submit|reset|image|file|password)$/i.test(ctl.type || '')) return { el: ctl };
     return mode === 'teach' ? { el } : null;
   }
-  /** A taught field, saved as a template field by the side panel. */
-  function teachField({ el, group }) {
-    const T = PDB.templates;
-    const kind = group ? 'group' : /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) ? 'control' : 'text';
-    const value = group ? PDB.dom.groupValue(group) : kind === 'control' ? PDB.dom.controlValue(el) : PDB.dom.textOf(el);
-    return {
-      kind, selector: T.selectorFor(el), anchor: group ? (group.label || T.anchorFor(el)) : T.anchorFor(el),
-      value: String(value || '').slice(0, 200), framePath: T.pagePath(location.pathname), context: T.contextFor(el), tag: el.tagName,
-      options: group ? group.opts.map(PDB.dom.optionLabelText).filter(Boolean).slice(0, 30) : undefined,
-    };
-  }
+  /** A taught field (Teach, or the element a time is read from), saved into a template by the side panel. */
+  const teachField = (target) => PDB.pagetpl.fieldFor(target);
   function startPick(mode, ctx) {
     stopPick();
     ensureOverlay();
     const tip = document.createElement('div');
     tip.className = 'tip';
-    tip.textContent = { extract: 'Click the part of the page to capture · Esc to cancel', teach: 'Click a value, a form field or a tick box to teach its label · Esc to cancel', media: 'Click an image, chart, audio or video · Esc to cancel', fill: 'Click a form field or a tick box to teach its label · Esc to cancel' }[mode];
+    tip.textContent = { extract: 'Click the part of the page to capture · Esc to cancel', teach: 'Click a value, a form field or a tick box to teach its label · Esc to cancel', media: 'Click an image, chart, audio or video · Esc to cancel', fill: 'Click a form field or a tick box to teach its label · Esc to cancel', time: 'Click the date or time this value belongs to · Esc to cancel' }[mode];
     shadow.appendChild(tip);
     let hover = null;
     const box = document.createElement('div');
@@ -136,6 +160,7 @@
       if (!el || el === host) return null;
       if (mode === 'media') return el.closest('img,canvas,video,audio,svg,picture') || null;
       if (mode === 'teach' || mode === 'fill') return teachTarget(el, mode, groupCache);
+      if (mode === 'time') return teachTarget(el, 'teach', groupCache);
       return el;
     };
     const groupCache = new Map(); // option → its group (grouping reads the whole page, so once per option)
@@ -154,7 +179,7 @@
       stopPick();
       try {
         if (mode === 'extract') chrome.runtime.sendMessage({ type: 'pdb:picked', result: extractElement(el, ctx) });
-        else if (mode === 'teach' || mode === 'fill') chrome.runtime.sendMessage({ type: 'pdb:taught', mode, field: teachField(el) });
+        else if (mode === 'teach' || mode === 'fill' || mode === 'time') chrome.runtime.sendMessage({ type: 'pdb:taught', mode, field: teachField(el) });
         else if (mode === 'media') chrome.runtime.sendMessage({ type: 'pdb:media', media: await grabMedia(el) });
       } catch (err) { chrome.runtime.sendMessage({ type: 'pdb:error', message: String(err && err.message || err) }); }
     };
@@ -241,6 +266,59 @@
     return { text: PDB.redact.pageText(document), known, top: window === window.top };
   }
 
-  window.__pdbAgent = { scan, aiText, setMarks, clearOverlay, focusMark, startPick, stopPick, fillScan, fillApply, fillUndo, rectsOf,
+  // ── AI extract → suggested template changes ─────────────────────────
+  /**
+   * Find AI-read values on this frame: each value's element (where its exact text is) and, when its time matches a
+   * date on the page, the element holding that date. Returns suggestions for the page template:
+   *   { framePath, found: [{ i, kind: 'add'|'relabel'|'same', fid?, field?, time?: { fid } | { field } }] }
+   */
+  function locateValues(items, ctx) {
+    const T = PDB.templates, PT = PDB.pagetpl, D = PDB.dom, C = PDB.core;
+    const framePath = T.pagePath(location.pathname);
+    const tpl = (ctx.pageTemplates || []).find((t) => t.framePath === framePath);
+    const located = tpl ? PT.extract(document, tpl, { ...ctx, registry: D.makeRegistry() }).located : new Map();
+    const fieldAt = new Map();
+    for (const [id, l] of located) { fieldAt.set(l.box, id); fieldAt.set(l.el, id); }
+    const norm = (s) => C.clean(s).replace(/\s+/g, '');
+    // elements that hold one value: leaves, table cells and form boxes
+    const els = Array.from((document.body || document.documentElement).querySelectorAll('*')).filter((el) => {
+      if (el.closest('#' + D.OVERLAY_ID) || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|OPTION|BR|HR|IMG)$/.test(el.tagName) || D.isHidden(el)) return false;
+      return /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) ? !/^(hidden|button|submit|reset|image|file|password|checkbox|radio)$/i.test(el.type)
+        : el.children.length === 0 || /^(TD|TH|DD|LI)$/.test(el.tagName);
+    });
+    const texts = new Map(els.map((el) => [el, /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) ? D.readControl(el) : D.textOf(el)]));
+    const innermost = (list) => list.filter((a) => !list.some((b) => b !== a && a.contains(b)));
+    const matches = (want) => {
+      const w = norm(want);
+      if (!w) return [];
+      let hit = els.filter((el) => norm(texts.get(el)) === w);
+      if (!hit.length && /^\d{4}-\d{2}-\d{2}$/.test(want)) hit = els.filter((el) => { const t = texts.get(el); if (!t || t.length > 24) return false; const p = C.parseDateTime(t); return p && C.isoDate(p) === want; });
+      return innermost(hit);
+    };
+    const dateEls = (time) => {
+      if (!time || time === 'nan') return [];
+      return innermost(els.filter((el) => { const t = texts.get(el); if (!t || t.length > 30) return false; const p = C.parseDateTime(t, { refYear: new Date().getFullYear() }); return p && p.kind !== 'relative' && C.formatTime(p) === time; }));
+    };
+    const asField = (el) => { const opt = D.optionAt(el); return PT.fieldFor(opt ? { el: D.groupOf(opt).opts[0], group: D.groupOf(opt) } : { el }); };
+    const found = [];
+    items.forEach((it, i) => {
+      const hit = matches(it.text || it.raw || it.value);
+      if (hit.length !== 1) return;
+      const el = hit[0];
+      const fid = fieldAt.get(el);
+      const s = { i };
+      if (fid) {
+        const f = tpl.fields.find((x) => x.id === fid);
+        s.kind = f && f.label !== it.label ? 'relabel' : 'same';
+        s.fid = fid; s.from = f ? PT.fieldName(f) : '';
+      } else { s.kind = 'add'; s.field = asField(el); }
+      const d = dateEls(it.time).filter((x) => x !== el);
+      if (d.length === 1) { const tf = fieldAt.get(d[0]); s.time = tf ? { fid: tf } : { field: asField(d[0]) }; }
+      found.push(s);
+    });
+    return { framePath, found };
+  }
+
+  window.__pdbAgent = { scan, sample, locateValues, aiText, setMarks, clearOverlay, focusMark, startPick, stopPick, fillScan, fillApply, fillUndo, rectsOf,
     textOfRef: (ref) => (reg.els[ref] ? PDB.dom.textOf(reg.els[ref]) : '') };
 })();

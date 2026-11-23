@@ -57,6 +57,20 @@
     return '';
   }
   const isSegment = (el) => el && el.tagName === 'INPUT' && TEXT_INPUT.test(el.type || '') && el.maxLength > 0 && el.maxLength <= 4;
+  /** A form box's value as a page scan reads it: split date boxes joined ("115/10/07"), a "please choose" first option is empty. */
+  function readControl(c) {
+    let value = controlValue(c).trim();
+    if (c.tagName === 'SELECT' && c.selectedIndex === 0 && /請選擇|選擇|^-+$/.test(value)) value = '';
+    if (isSegment(c)) {
+      const seg = [value];
+      // the boxes after it in the same parent, as a page scan joins them
+      const peers = c.parentNode ? Array.from(c.parentNode.querySelectorAll('input,select,textarea'))
+        .filter((x) => x.parentNode === c.parentNode && !isHidden(x) && !/^(checkbox|radio|button|submit|reset|image|file|password|hidden)$/i.test(x.type)) : [];
+      for (let k = peers.indexOf(c) + 1; k > 0 && k < peers.length && isSegment(peers[k]); k++) seg.push(controlValue(peers[k]).trim());
+      value = seg.filter(Boolean).join('/');
+    }
+    return value;
+  }
 
   /**
    * Visible text of an element, with line breaks at <br> and block boundaries.
@@ -267,7 +281,7 @@
     for (const g of optionGroups(opts, ctx)) {
       if (!g.label) continue;
       const value = groupValue(g);
-      if (value) pairs.push({ label: g.label, value, ref: reg.id(g.container), src: 'options' });
+      if (value) pairs.push({ label: g.label, value, ref: reg.id(g.container), src: 'options', opt: reg.id(g.opts[0]) });
     }
 
     // 3. <dl>
@@ -600,7 +614,7 @@
       const tref = reg.id(t);
       for (const r of res.records) { for (const it of r.items) it.region = tref; for (const m of r.meds) m.region = tref; }
       records.push(...res.records);
-      regions.push({ ref: tref, kind: res.kind, items: res.records.reduce((n, r) => n + r.items.length + r.meds.length, 0) });
+      regions.push({ ref: tref, kind: res.kind, items: res.records.reduce((n, r) => n + r.items.length + r.meds.length, 0), map: res.map || null });
     }
     let broken = [], found = [];
     let pairs = [];
@@ -615,9 +629,12 @@
       const rec = C().recordFromPairs(pairs, ctx);
       if (rec.items.length || rec.meds.length || rec.skipped.length) { records.push(rec); regions.push({ ref: null, kind: 'fields', items: rec.items.length }); }
     }
-    return { records, regions, registry: reg, broken, found };
+    // how each element was read (a page template keeps it): option groups are found again by their first option
+    const pairInfo = new Map();
+    for (const p of pairs) if (p.ref != null && !pairInfo.has(p.ref)) pairInfo.set(p.ref, { src: p.src, opt: p.opt != null ? p.opt : null });
+    return { records, regions, registry: reg, broken, found, pairInfo };
   }
 
   PDB.dom = { textOf, linesOf, gridOf, precedingText, labelCandidates, bestLabel, collectPairs, extractFromRoot,
-    makeRegistry, isHidden, optionState, controlValue, isSegment, OVERLAY_ID, optionGroups, optionLabelText, groupLabel, optionsIn, optionChecked, groupKeyOf, radioGroupOf, groupValue, optionAt, groupOf, isImgOption };
+    makeRegistry, isHidden, optionState, controlValue, readControl, splitInlinePairs, isSegment, OVERLAY_ID, optionGroups, optionLabelText, groupLabel, optionsIn, optionChecked, groupKeyOf, radioGroupOf, groupValue, optionAt, groupOf, isImgOption };
 })(globalThis);

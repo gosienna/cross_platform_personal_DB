@@ -19,18 +19,19 @@ function chromeStub() {
   };
 }
 
-async function loadPage(rel, tabPage) {
+async function loadPage(rel, tabPage, { query = '', idb = null, storage = null } = {}) {
   const file = path.join(ROOT, 'extension', rel);
   const html = fs.readFileSync(file, 'utf8');
   const errors = [];
   const vc = new VirtualConsole();
   vc.on('jsdomError', (e) => { if (!/Could not load script|not implemented/i.test(e.message)) errors.push(e.message); });
-  const dom = new JSDOM(html.replace(/<script src="[^"]+"><\/script>/g, ''), { url: 'chrome-extension://x/' + rel, runScripts: 'outside-only', virtualConsole: vc, pretendToBeVisual: true });
+  const dom = new JSDOM(html.replace(/<script src="[^"]+"><\/script>/g, ''), { url: 'chrome-extension://x/' + rel + query, runScripts: 'outside-only', virtualConsole: vc, pretendToBeVisual: true });
   const w = dom.window;
   const fidb = require('fake-indexeddb');
-  w.indexedDB = new fidb.IDBFactory();
+  w.indexedDB = idb || new fidb.IDBFactory();
   w.IDBKeyRange = fidb.IDBKeyRange;
   w.chrome = chromeStub();
+  if (storage) w.chrome.storage = storage;
   if (tabPage) {
     // a simulated tab: executeScript injects files into / runs functions in the page's own window
     w.chrome.tabs.query = async () => [{ id: 1, url: tabPage.url, windowId: 1 }];
@@ -120,6 +121,9 @@ test('side panel: scan → preview (search, highlights switch) → save → fill
   assert.deepEqual(errors, []);
   assert.match(w.document.querySelector('#status').textContent, /1 patient · 5 values found/);
   assert.equal(w.document.querySelector('input.pid').value, 'A223456789');
+  // a new page: read by a draft template from the built-in rules; every row shows where its time comes from
+  assert.ok(w.document.querySelector('.pagebar.draft'), 'draft template banner');
+  assert.equal(w.document.querySelectorAll('#records .chip').length, 5);
   // the page got an overlay, but its own content is unchanged
   assert.ok(page.dom.window.document.getElementById('pdb-overlay-host'));
   // search: narrows the list (and the page outlines); clearing it brings everything back
@@ -149,10 +153,19 @@ test('side panel: scan → preview (search, highlights switch) → save → fill
   assert.ok(page.dom.window.document.getElementById('pdb-overlay-host'));
   w.document.querySelector('#save').click();
   await tick(400);
-  assert.match(w.document.querySelector('#status').textContent, /Saved 5 values for 1 patient/);
-  // scanning again: everything is a duplicate now and unticked
+  assert.match(w.document.querySelector('#status').textContent, /Saved 5 values for 1 patient\. Page template saved/);
+  const pts = await w.PDB.db.getPageTemplates();
+  assert.equal(pts.length, 1);
+  assert.equal(pts[0].complete, true);
+  assert.equal(pts[0].origin, 'https://ltc.example');
+  const sample = await w.PDB.db.getSample(pts[0].id);
+  assert.ok(sample && /data-pdb-t=/.test(sample.html), 'masked sample page saved');
+  assert.ok(!sample.html.includes('A223456789'), 'no national ID in the sample');
+  // scanning again: read strictly by the saved template; everything is a duplicate now and unticked
   w.document.querySelector('#scan').click();
   await tick(500);
+  assert.ok(w.document.querySelector('.pagebar') && !w.document.querySelector('.pagebar.draft'), 'strict template banner');
+  assert.match(w.document.querySelector('#status').textContent, /5 values found/);
   assert.ok([...w.document.querySelectorAll('.badge')].some((b) => b.textContent === 'already saved'));
   assert.ok([...w.document.querySelectorAll('#records tbody input[type=checkbox]')].every((c) => !c.checked));
 
@@ -184,4 +197,52 @@ test('side panel: scan → preview (search, highlights switch) → save → fill
   await tick(200);
   assert.equal(fd.querySelector('#pname').value, '');
   assert.deepEqual(w2.errors, []);
+});
+
+test('dashboard: Mappings shows a page template with its sample page, labels and time links; edits are saved', async () => {
+  const { PDB } = require('./helpers/load.js');
+  const doc = new JSDOM(`<body><div><span>填表日期</span><span>115/10/07</span></div><div><span>姓名</span><span>測試甲</span></div>
+    <div><span>體重</span><span>60</span></div></body>`).window.document;
+  const ex = PDB.dom.extractFromRoot(doc, { origin: 'https://his.example', registry: PDB.dom.makeRegistry(), templates: [] });
+  const tpl = { ...PDB.pagetpl.draft(doc, ex, { origin: 'https://his.example', framePath: '/form/*', title: 'Assessment' }), complete: true };
+  const html = PDB.pagetpl.snapshot(doc, tpl, PDB.pagetpl.extract(doc, tpl, { registry: PDB.dom.makeRegistry() }));
+  const { w, errors } = await loadPage('dashboard/dashboard.html');
+  await w.PDB.db.savePageTemplate(JSON.parse(JSON.stringify(tpl)));
+  await w.PDB.db.putSample({ id: tpl.id, html, width: 900 });
+  w.document.querySelector('[data-view="mappings"]').click();
+  await tick(200);
+  assert.deepEqual(errors, []);
+  const row = [...w.document.querySelectorAll('#ptList tbody tr')].find((tr) => tr.textContent.includes('/form/*'));
+  assert.ok(row, 'page template listed');
+  row.click();
+  await tick(200);
+  const D = w.document;
+  const fieldRow = (label) => [...D.querySelectorAll('#ptDetail tr[data-u]')].find((tr) => tr.querySelector('td').textContent.includes(label));
+  assert.ok(D.querySelector('#ptDetail iframe.smp-frame'), 'sample page shown');
+  // the field list is a side panel: hidden at first, shown with its button; no new-tab page any more
+  const panel = D.querySelector('#ptDetail .tpl-fields');
+  assert.equal(panel.hidden, true, 'field list hidden by default');
+  D.querySelector('#ptDetail .listbtn').click();
+  assert.equal(panel.hidden, false);
+  assert.ok(![...D.querySelectorAll('#ptDetail button')].some((b) => /new tab/i.test(b.textContent)));
+  assert.match(fieldRow('Body weight').textContent, /⏱ ← 填表日期/);
+  assert.match(fieldRow('Name').textContent, /⏱ fixed/);
+  // edit: weight's time → capture time
+  fieldRow('Body weight').querySelector('button').click();
+  await tick(50);
+  const cap = [...D.querySelectorAll('#dlgForm input[name=tl]')].find((r) => r.value === 'capture');
+  cap.checked = true; cap.dispatchEvent(new w.Event('change'));
+  [...D.querySelectorAll('#dlgForm button')].find((b) => b.value === 'ok').click();
+  D.querySelector('#dlg').close('ok');
+  await tick(200);
+  const saved = (await w.PDB.db.getPageTemplates())[0];
+  assert.equal(JSON.stringify(saved.fields.find((f) => f.label === 'Body weight').time), JSON.stringify({ mode: 'capture' }));
+  assert.match(fieldRow('Body weight').textContent, /capture time ⚠/);
+  // remove a mapping straight from the list, then bring it back
+  [...fieldRow('Name').querySelectorAll('button')].find((b) => b.textContent === 'remove').click();
+  await tick(200);
+  assert.equal((await w.PDB.db.getPageTemplates())[0].fields.find((f) => f.prevLabel === 'Name').label, '__ignore__');
+  [...fieldRow('Name').querySelectorAll('button')].find((b) => b.textContent === 'restore').click();
+  await tick(200);
+  assert.ok((await w.PDB.db.getPageTemplates())[0].fields.some((f) => f.label === 'Name'));
 });

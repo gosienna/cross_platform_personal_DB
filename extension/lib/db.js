@@ -3,9 +3,11 @@
  *   IndexedDB "pdb":
  *     rows   – the unified data: { k, patientId, label, value, time, source }   (k = internal unique key)
  *     blobs  – media bytes: { id: "sha256:…", blob, mime, size, name, createdAt }
+ *     samples – masked sample page of a page template: { id (= template id), html, capturedAt }
  *   chrome.storage.local:
- *     vocab      – { aliases: { normLabel: { label, sites?, source, createdAt } } }
- *     templates  – [{ id, origin, path, direction, fields: [{ selector, anchor, label }] }]
+ *     vocab         – { aliases: { normLabel: { label, sites?, source, createdAt } } }
+ *     pageTemplates – one template per page (see lib/pagetpl.js); used by Capture, and by Fill (found by context)
+ *     templates     – fields taught in Fill: [{ id, origin, path, framePath, direction: 'fill', fields }]
  *     settings   – backup / AI / privacy settings
  *     meta       – { dataVersion, lastChange }  (backup uses it to know whether data changed)
  */
@@ -18,14 +20,17 @@
   function open() {
     if (_db) return Promise.resolve(_db);
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1);
+      const req = indexedDB.open(DB_NAME, 2);
       req.onupgradeneeded = () => {
         const db = req.result;
-        const rows = db.createObjectStore('rows', { keyPath: 'k' });
-        rows.createIndex('patientId', 'patientId');
-        rows.createIndex('label', 'label');
-        rows.createIndex('patientLabel', ['patientId', 'label']);
-        db.createObjectStore('blobs', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('rows')) {
+          const rows = db.createObjectStore('rows', { keyPath: 'k' });
+          rows.createIndex('patientId', 'patientId');
+          rows.createIndex('label', 'label');
+          rows.createIndex('patientLabel', ['patientId', 'label']);
+        }
+        if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('samples')) db.createObjectStore('samples', { keyPath: 'id' });
       };
       req.onsuccess = () => { _db = req.result; _db.onversionchange = () => { _db.close(); _db = null; }; resolve(_db); };
       req.onerror = () => reject(req.error);
@@ -153,6 +158,58 @@
   }
   const getTemplates = () => get('templates', []);
   const saveTemplates = (t) => set('templates', t);
+
+  // ── page templates and their sample pages ───────────────────────────
+  /**
+   * Older Capture templates (taught fields only) → page templates marked incomplete: the page is still read by the
+   * rules plus these fields until its next Save, which makes the template complete.
+   */
+  function migrateTemplates(old) {
+    const S = PDB.schema;
+    const by = new Map();
+    for (const t of old) {
+      const key = `${t.origin}|${t.framePath || ''}`;
+      if (!by.has(key)) by.set(key, { id: 'pt-' + String(t.id || Date.now()).replace(/^tpl-/, ''), v: 2, origin: t.origin, framePath: t.framePath || '', title: '', complete: false, createdAt: Date.now(), updatedAt: Date.now(), fields: [], tables: [] });
+      const pt = by.get(key);
+      (t.fields || []).forEach((f, i) => {
+        const e = S && S.byLabel[f.label];
+        pt.fields.push({ ...f, id: `${pt.id}-f${pt.fields.length}-${i}`, group: 'p', rawLabel: f.anchor || f.label, role: e && e.identity ? 'identity' : 'data',
+          time: e && e.persistent ? { mode: 'nan' } : { mode: 'capture' }, from: 'taught', how: 'template' });
+      });
+    }
+    return [...by.values()];
+  }
+  async function getPageTemplates() {
+    const have = await get('pageTemplates', null);
+    if (have) return have;
+    const old = await getTemplates();
+    const pts = migrateTemplates(old.filter((t) => (t.direction || 'extract') === 'extract'));
+    await set('pageTemplates', pts);
+    await saveTemplates(old.filter((t) => t.direction === 'fill'));
+    return pts;
+  }
+  const savePageTemplates = async (list) => { await set('pageTemplates', list); await touch(); };
+  async function savePageTemplate(t) {
+    const all = await getPageTemplates();
+    const i = all.findIndex((x) => x.id === t.id || (x.origin === t.origin && x.framePath === t.framePath));
+    if (i >= 0) all[i] = t; else all.push(t);
+    await savePageTemplates(all);
+  }
+  async function deletePageTemplate(id) {
+    await savePageTemplates((await getPageTemplates()).filter((x) => x.id !== id));
+    const db = await open();
+    const tx = db.transaction('samples', 'readwrite');
+    tx.objectStore('samples').delete(id);
+    await done(tx);
+  }
+  async function putSample(sample) {
+    const db = await open();
+    const tx = db.transaction('samples', 'readwrite');
+    tx.objectStore('samples').put({ ...sample, capturedAt: sample.capturedAt || Date.now() });
+    await done(tx);
+  }
+  async function getSample(id) { const db = await open(); return req(db.transaction('samples').objectStore('samples').get(id)); }
+  async function allSamples() { const db = await open(); return req(db.transaction('samples').objectStore('samples').getAll()); }
   const getSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await get('settings', {})) });
   const saveSettings = async (patch) => set('settings', { ...(await getSettings()), ...patch });
 
@@ -164,5 +221,6 @@
   };
 
   PDB.db = { open, putRows, deleteRows, allRows, rowsByPatient, rowsByLabels, existingFor, patients, mergePatients, clearAll,
-    sha256, putBlob, getBlob, allBlobMeta, get, set, getVocab, learnAlias, getTemplates, saveTemplates, getSettings, saveSettings, DEFAULT_SETTINGS };
+    sha256, putBlob, getBlob, allBlobMeta, get, set, getVocab, learnAlias, getTemplates, saveTemplates, getSettings, saveSettings, DEFAULT_SETTINGS,
+    migrateTemplates, getPageTemplates, savePageTemplates, savePageTemplate, deletePageTemplate, putSample, getSample, allSamples };
 })(globalThis);

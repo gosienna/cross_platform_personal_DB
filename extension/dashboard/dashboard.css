@@ -31,3 +31,46 @@ h2 { font-size: 18px; margin: 4px 0 12px; } h3 { font-size: 14px; margin: 18px 0
 .viz .legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-secondary); }
 .viz .legend i { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 4px; }
 .viz .tip { position: absolute; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--grid); border-radius: 6px; padding: 4px 8px; font-size: 11px; box-shadow: 0 2px 8px rgba(0,0,0,.12); white-space: nowrap; display: none; }
+/* page templates: sample page with outlined fields, and the field list */
+main:has(#v-mappings.on) { max-width: none; }
+.plist tr.sel td { background: var(--soft); }
+.tplgrid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(320px, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 1100px) { .tplgrid { grid-template-columns: 1fr; } }
+.smp-pane { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; position: relative; }
+.smp-stage { position: relative; transform-origin: 0 0; }
+.smp-frame { display: block; border: 0; height: 600px; background: #fff; }
+.smp-layer, .smp-svg, .smp-catch { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+.smp-layer, .smp-svg { pointer-events: none; }
+.smp-catch { cursor: crosshair; background: rgba(255,61,127,.03); }
+.smp-box { position: absolute; box-sizing: border-box; border: 2px solid; border-radius: 3px; pointer-events: auto; cursor: pointer; }
+.smp-box .tag { position: absolute; left: -2px; top: -1.5em; font: 600 11px/1.3 system-ui, sans-serif; color: #fff; padding: 1px 5px; border-radius: 3px; white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; display: none; }
+.smp-box:hover .tag, .smp-box.hot .tag, .smp-box.src .tag { display: block; z-index: 3; }
+.smp-box.data { border-color: #1a9e5a; background: rgba(26,158,90,.06); } .smp-box.data .tag { background: #1a9e5a; }
+.smp-box.identity { border-color: #7b4fd6; background: rgba(123,79,214,.06); } .smp-box.identity .tag { background: #7b4fd6; }
+.smp-box.time { border-color: #2f6fd6; border-style: dashed; background: rgba(47,111,214,.07); } .smp-box.time .tag { background: #2f6fd6; }
+.smp-box.unmapped { border-color: #e0a100; background: rgba(224,161,0,.07); } .smp-box.unmapped .tag { background: #c48a00; }
+.smp-box.table { border-color: #2f6fd6; background: rgba(47,111,214,.03); pointer-events: none; } .smp-box.table .tag { background: #2f6fd6; display: block; pointer-events: auto; }
+.smp-box.ignored { border-color: #999; border-style: dotted; background: rgba(0,0,0,.03); } .smp-box.ignored .tag { background: #888; }
+.smp-box.hot { outline: 3px solid #ff3d7f; outline-offset: 1px; }
+.smp-box.src { outline: 3px solid #2f6fd6; outline-offset: 1px; }
+.smp-box.pick { border-color: #ff3d7f; background: rgba(255,61,127,.08); pointer-events: none; }
+.smp-link { fill: none; stroke: #2f6fd6; stroke-width: 2; stroke-dasharray: 5 4; }
+.legend { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.legend .lg::before, .dot { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 2px; border: 2px solid; margin-right: 4px; vertical-align: -1px; }
+.lg.data::before, .dot.data { border-color: #1a9e5a; } .lg.identity::before, .dot.identity { border-color: #7b4fd6; }
+.lg.time::before, .dot.time { border-color: #2f6fd6; border-style: dashed; } .lg.unmapped::before, .dot.unmapped { border-color: #e0a100; }
+.lg.table::before, .dot.table { border-color: #2f6fd6; } .lg.ignored::before, .dot.ignored { border-color: #999; border-style: dotted; }
+.tpl-fields { max-height: 80vh; overflow: auto; }
+.tpl-fields tr.hot td { background: rgba(255,61,127,.08); }
+.tpl-fields tr.ignored td { opacity: .55; }
+.chip { display: inline-block; border: 1px solid var(--line); background: var(--soft); border-radius: 9px; padding: 0 6px; font-size: 11px; color: #2f6fd6; white-space: nowrap; }
+.chip.warn { color: #8a6100; border-color: #e0c060; }
+#dlgForm .choices { display: grid; gap: 4px; }
+.payload { max-height: 40vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px; }
+
+/* the field list: a side panel beside the sample, hidden by default */
+.tplgrid.nolist { grid-template-columns: minmax(0, 1fr); }
+.grow { flex: 1; }
+.listbtn.on { background: var(--pri); border-color: var(--pri); color: #fff; }
+
+.tpl-fields td.acts { white-space: nowrap; }
