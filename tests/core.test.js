@@ -136,3 +136,16 @@ test('history: replaced values are kept in order, without repeats, at most HISTO
   assert.equal(old.history.length, C.HISTORY_MAX);
   assert.equal(old.history[old.history.length - 1].value, String(C.HISTORY_MAX + 4));
 });
+
+test('numParts: single and multi-value readings for trend charts', () => {
+  assert.deepEqual(C.numParts('98.5'), [98.5]);
+  assert.deepEqual(C.numParts('149/71'), [149, 71]);
+  assert.deepEqual(C.numParts(' 149 / 71 mmHg'), [149, 71]);
+  assert.deepEqual(C.numParts('１４９／７１'), [149, 71]); // full-width
+  assert.deepEqual(C.numParts('120/80/72'), [120, 80, 72]);
+  assert.deepEqual(C.numParts('110 mg/dL'), [110]);
+  assert.equal(C.numParts('normal'), null);
+  assert.equal(C.numParts('2024/05/01 08:00'), null);
+  assert.equal(C.numParts('3 to 5'), null);
+  assert.equal(C.numParts(''), null);
+});

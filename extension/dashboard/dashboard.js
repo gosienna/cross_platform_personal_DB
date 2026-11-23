@@ -64,15 +64,19 @@
     for (const r of timed) (by[r.label] = by[r.label] || []).push(r);
     for (const [label, rs] of Object.entries(by)) {
       const pts = rs.map((r) => ({ t: C.timeToDate(r.time), v: r.value, dateOnly: r.time.length === 8 })).sort((a, b) => a.t - b.t);
-      const entry = PDB.schema.byLabel[label] || (label.startsWith('Blood glucose') ? PDB.schema.byKey.glucose : null);
-      if (label === 'Blood pressure') {
-        const sys = [], dia = [];
-        for (const p of pts) { const m = String(p.v).match(/^(\d+)\/(\d+)$/); if (m) { sys.push({ ...p, v: +m[1] }); dia.push({ ...p, v: +m[2] }); } }
-        if (sys.length >= 2) Chart.trend(charts, { title: 'Blood pressure', unit: 'mmHg', series: [{ name: 'Systolic', points: sys }, { name: 'Diastolic', points: dia }] });
-        continue;
-      }
-      const num = pts.filter((p) => /^-?\d+(\.\d+)?$/.test(p.v)).map((p) => ({ ...p, v: +p.v }));
-      if (num.length >= 2 && num.length === pts.length) Chart.trend(charts, { title: label, unit: entry ? entry.unit : '', series: [{ name: label, points: num }] });
+      // a label that is (or contains) a known one, e.g. "血壓 BP" → Blood pressure
+      const known = [label, ...label.split(/[\s()（）\[\]【】,，:：]+/)].map((x) => x && C.resolveLabel(x)).find(Boolean);
+      const entry = PDB.schema.byLabel[label] || (known && PDB.schema.byLabel[known.label]) || (label.startsWith('Blood glucose') ? PDB.schema.byKey.glucose : null);
+      const isBP = entry && entry.type === 'bp';
+      // readings with several numbers ("149/71") become one line per number on the same chart
+      const parts = pts.map((p) => C.numParts(p.v));
+      const n = isBP ? 2 : parts[0] ? parts[0].length : 0;
+      const ok = pts.map((p, j) => ({ p, v: parts[j] })).filter((x) => x.v && x.v.length === n);
+      if (!n || n > 4 || ok.length < 2 || (!isBP && ok.length !== pts.length)) continue; // BP tolerates stray text; others must all be numeric
+      const sub = label.split(/\s*[\/／]\s*/); // e.g. "收縮壓/舒張壓"
+      const names = isBP ? ['Systolic', 'Diastolic'] : n === 1 ? [label] : sub.length === n ? sub : Array.from({ length: n }, (_, k) => `Value ${k + 1}`);
+      const series = names.map((name, k) => ({ name, points: ok.map(({ p, v }) => ({ ...p, v: v[k] })) }));
+      Chart.trend(charts, { title: label, unit: entry ? entry.unit : '', series });
     }
     if (charts.children.length) view.append(h('h3', {}, 'Trends'), charts);
     // medications

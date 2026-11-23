@@ -24,8 +24,8 @@ h2 { font-size: 18px; margin: 4px 0 12px; } h3 { font-size: 14px; margin: 18px 0
 .mapping th select { max-width: 150px; font-weight: normal; }
 .ok { color: var(--ok); } .bad { color: var(--bad); }
 /* charts (palette: reference instance, slots 1–2) */
-.viz { --surface-1:#fcfcfb; --text-primary:#0b0b0b; --text-secondary:#52514e; --grid:#e6e5e1; --series-1:#2a78d6; --series-2:#eb6834; position: relative; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px 6px; background: var(--surface-1); }
-@media (prefers-color-scheme: dark) { .viz { --surface-1:#1a1a19; --text-primary:#f0efec; --text-secondary:#c3c2b7; --grid:#2e2e2c; --series-1:#3987e5; --series-2:#d95926; } }
+.viz { --surface-1:#fcfcfb; --text-primary:#0b0b0b; --text-secondary:#52514e; --grid:#e6e5e1; --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a; --series-4:#eda100; position: relative; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px 6px; background: var(--surface-1); }
+@media (prefers-color-scheme: dark) { .viz { --surface-1:#1a1a19; --text-primary:#f0efec; --text-secondary:#c3c2b7; --grid:#2e2e2c; --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-4:#c98500; } }
 .viz h4 { margin: 0; font-size: 13px; color: var(--text-primary); } .viz .sub { font-size: 11px; color: var(--text-secondary); }
 .viz svg { display: block; width: 100%; height: 170px; overflow: visible; }
 .viz .legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-secondary); }

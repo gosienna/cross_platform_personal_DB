@@ -75,6 +75,8 @@ test('dashboard: import native CSV → patient view with trend chart → export'
     ['N1', 'Body temperature', '37.2', '202611020000', 'https://h'],
     ['N1', 'Blood pressure', '120/80', '202611010000', 'https://h'],
     ['N1', 'Blood pressure', '135/88', '202611020000', 'https://h'],
+    ['N1', '血壓 BP', '149/71', '202611010000', 'https://h'],
+    ['N1', '血壓 BP', '142 / 76 mmHg', '202611020000', 'https://h'],
   ].map((r) => r.join(',')).join('\n');
   const file = new w.File([rows], 'export.csv', { type: 'text/csv' });
   const input = w.document.querySelector('#file');
@@ -83,19 +85,23 @@ test('dashboard: import native CSV → patient view with trend chart → export'
   await tick(300);
   const btn = [...w.document.querySelectorAll('#imp button')].find((b) => b.textContent === 'Import');
   assert.ok(btn, 'import preview shown');
-  assert.match(w.document.querySelector('#imp').textContent, /1 patients · 5 rows · 5 new/);
+  assert.match(w.document.querySelector('#imp').textContent, /1 patients · 7 rows · 7 new/);
   btn.click();
   await tick(300);
-  assert.match(w.document.querySelector('#imp').textContent, /Imported 5 rows/);
+  assert.match(w.document.querySelector('#imp').textContent, /Imported 7 rows/);
   w.document.querySelector('[data-view="patients"]').click();
   await tick(300);
   w.document.querySelector('.plist tbody tr').dispatchEvent(new w.Event('click'));
   await tick(400);
   const pv = w.document.querySelector('#pview');
   assert.match(pv.textContent, /測試辛/);
-  assert.equal(pv.querySelectorAll('.viz').length, 2); // temperature + blood pressure
-  const bp = [...pv.querySelectorAll('.viz')].find((v) => v.querySelector('h4').textContent === 'Blood pressure');
-  assert.equal(bp.querySelectorAll('path').length, 2); // systolic + diastolic
+  assert.equal(pv.querySelectorAll('.viz').length, 3); // temperature + blood pressure + 血壓 BP
+  const viz = (t) => [...pv.querySelectorAll('.viz')].find((v) => v.querySelector('h4').textContent === t);
+  assert.equal(viz('Blood pressure').querySelectorAll('path').length, 2); // systolic + diastolic
+  const bp2 = viz('血壓 BP'); // an unrecognised label holding "149/71" readings: still two lines on one chart
+  assert.equal(bp2.querySelectorAll('path').length, 2);
+  assert.match(bp2.querySelector('.legend').textContent, /Systolic.*Diastolic/);
+  assert.match(bp2.querySelector('.sub').textContent, /latest 142\/76 mmHg/);
   // generic sheet import preview
   const sheet = new w.File(['病歷號,姓名,測量時間,體溫\nM1,測試壬,2026/11/01 08:00,36.8\nM1,測試壬,2026/11/01 12:00,37.9\n'], 'vitals.csv');
   w.document.querySelector('[data-view="import"]').click();

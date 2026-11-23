@@ -187,6 +187,16 @@
 
   // ── value normalisation ──────────────────────────────────────────────
   const num = (s) => { const m = nfkc(s).match(/-?\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : null; };
+  /**
+   * The numbers of a reading for trend charts: "98.5" → [98.5], "149/71" or "149 / 71 mmHg" → [149, 71].
+   * Anything else (free text, ranges, dates, digits after the unit) → null.
+   */
+  function numParts(v) {
+    const s = nfkc(v).trim();
+    const m = s.match(/^-?\d+(?:\.\d+)?(?:\s*\/\s*-?\d+(?:\.\d+)?)*/);
+    if (!m || !/^\s*[^\s\d]{0,8}$/.test(s.slice(m[0].length))) return null;
+    return m[0].split('/').map((x) => parseFloat(x));
+  }
   const fmtNum = (x) => String(Math.round(x * 10) / 10);
   /** Placeholder or punctuation-only values ("民 年 月 日", ", ,", "--") count as empty. */
   const isEmptyValue = (t) => !t || /^[\s,，;；、|/\-—–.。:：()（）_*]*$/.test(t) || /^(null|undefined|nan|請選擇|--請選擇--)$/i.test(t) || /^民?\s*(國)?\s*年\s*月\s*日$/.test(t.replace(/[\s;/]/g, ''));
@@ -777,7 +787,7 @@
   PDB.core = {
     nfkc, clean, cleanLabel, normLabel, resolveLabel, labelKind, medPart, vitalFromText,
     parseDateTime, formatTime, isoDate, utcStamp, displayTime, timeToDate,
-    normalizeValue, buildMedication, medValue,
+    normalizeValue, buildMedication, medValue, numParts,
     newRecord, specFor, addPair, addMapped, addStacked, analyzeTable, listMap, applyList, chartMap, applyChart,
     recordFromPairs, mergeRecords, recordToRows, isEmptyValue, joinLines,
     rowKey, isMulti, diffRows, buildIdentityIndex, resolveIdentity,

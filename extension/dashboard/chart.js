@@ -1,6 +1,7 @@
 /*
  * Small trend chart (inline SVG): one measure per chart, one y-axis, 2px lines, ≥8px markers,
- * recessive grid, crosshair + tooltip on hover. Blood pressure = two series with legend + direct labels.
+ * recessive grid, crosshair + tooltip on hover. Multi-value readings (e.g. BP 149/71) = up to four
+ * series on the same axis, with legend + direct labels.
  */
 (function (g) {
   const NS = 'http://www.w3.org/2000/svg';
