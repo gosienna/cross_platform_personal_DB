@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Personal DB</title>
+  <link rel="stylesheet" href="../ui/common.css">
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header class="bar">
+    <strong>Personal DB</strong>
+    <nav class="tabs">
+      <button data-tab="capture" class="on">Capture</button>
+      <button data-tab="fill">Fill</button>
+    </nav>
+    <button id="openDash" class="link" title="Open the dashboard">Dashboard ↗</button>
+  </header>
+
+  <section id="tab-capture" class="tab on">
+    <div class="actions">
+      <button id="scan" class="primary">Scan page</button>
+      <button id="pick" title="Capture only the part of the page you click">Pick region</button>
+      <button id="teach" title="Click a value, form field or tick box and give it a label. Used by Capture and Fill on this site">Teach</button>
+      <button id="shot" title="Save a screenshot of the visible page">Screenshot</button>
+      <button id="media" title="Click an image, chart, audio or video to save it">Pick media</button>
+      <button id="ai" title="Send a privacy-masked copy of the page to Claude (opt-in)">AI extract</button>
+    </div>
+    <p id="status" class="status">Open a patient page, then press <b>Scan page</b>. Nothing is saved until you press Save.</p>
+    <div class="listtools" id="capTools" hidden>
+      <input type="search" id="capSearch" placeholder="Search fields and values" autocomplete="off">
+      <span id="capCount" class="small mut"></span>
+      <button id="capMarks" class="marks" title="Show or hide the outlines on the page">Highlights: on</button>
+    </div>
+    <div id="regions"></div>
+    <div id="records"></div>
+    <div id="saveBar" class="savebar" hidden>
+      <label><input type="checkbox" id="rememberGlobal" checked> Mappings I choose apply to all sites</label>
+      <div><button id="discard">Discard</button> <button id="save" class="primary">Save</button></div>
+    </div>
+  </section>
+
+  <section id="tab-fill" class="tab">
+    <div class="row">
+      <label>Patient <select id="fillPatient"></select></label>
+    </div>
+    <div class="row">
+      <label>Vitals from <select id="fillTime"><option value="">latest</option></select></label>
+    </div>
+    <div class="actions">
+      <button id="fillScan" class="primary">Scan form</button>
+      <button id="fillTeach" title="Click a form field or tick box and give it a label. Used by Fill and Capture on this site">Teach</button>
+      <button id="copyText" title="Copy this patient as text">Copy as text</button>
+    </div>
+    <p id="fillStatus" class="status">Choose a patient, open the target form, then <b>Scan form</b>. Nothing is typed until you press Fill.</p>
+    <div class="listtools" id="fillTools" hidden>
+      <input type="search" id="fillSearch" placeholder="Search fields and values" autocomplete="off">
+      <span id="fillCount" class="small mut"></span>
+      <button id="fillMarks" class="marks" title="Show or hide the outlines on the page">Highlights: on</button>
+    </div>
+    <div id="fillList"></div>
+    <div id="fillBar" class="savebar" hidden>
+      <label><input type="checkbox" id="fillOverwrite"> Also overwrite fields that already have a value</label>
+      <div><button id="fillUndo" disabled>Undo</button> <button id="fillApply" class="primary">Fill</button></div>
+    </div>
+  </section>
+
+  <dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+
+  <script src="../lib/schema.js"></script>
+  <script src="../lib/core.js"></script>
+  <script src="../lib/db.js"></script>
+  <script src="../lib/dom.js"></script>
+  <script src="../lib/redact.js"></script>
+  <script src="../vendor/anthropic.js"></script>
+  <script src="../lib/ai.js"></script>
+  <script src="../ui/common.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

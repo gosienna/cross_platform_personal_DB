@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><title>基本資料｜居護系統</title></head><body>
+<div class="search"><label>快速搜尋：</label><input name="Name" placeholder=""></div>
+<form class="case">
+ <div class="row"><input type="checkbox" id="IsOpenCase" checked><label for="IsOpenCase">收案</label></div>
+ <div class="row"><label><span>*</span>個案編號</label><input name="PatientNo" value="HC-0042"></div>
+ <div class="row"><label>狀態</label><input name="Status" value="收案中" readonly></div>
+ <div class="row"><label id="lbl_CaseDate">收案日期</label><input name="CaseDate" value="2025/09/22" readonly></div>
+ <div class="row"><label id="lbl_Name"><span>*</span>姓名</label><input formcontrolname="CName" name="CName" value="測試戊"></div>
+ <div class="row"><label>暱稱</label><input name="Nickname" value=""></div>
+ <div class="row"><label id="lbl_Birthday"><span>*</span>生日</label>
+   <span class="k-datepicker"><span class="roc"><input type="tel" maxlength="3" value="040"><input type="tel" maxlength="2" value="11"><input type="tel" maxlength="2" value="09"></span></span></div>
+ <div class="row"><label id="lbl_Sex">性別</label>
+   <span><input type="radio" name="Sex" id="sexM"><label for="sexM">男</label><input type="radio" name="Sex" id="sexF" checked><label for="sexF">女</label></span></div>
+ <div class="row"><label><span>*</span>身分證或護照號</label><input name="CId" value="B234567890"></div>
+ <div class="row"><label>血型</label><select name="Blood"><option value="">--</option><option value="A">A</option><option value="O" selected>O</option></select></div>
+ <div class="row"><label>身高</label><input name="Height" value="158"></div>
+ <div class="row"><label>體重</label><input name="Weight" value="52.5"></div>
+ <div class="row"><label>電話</label><input name="Phone" value="07-1234567"></div>
+ <div class="row"><label>戶籍地址</label><input name="Addr" value="測試市測試區測試路2號"></div>
+ <div class="row"><label>過去病史</label><textarea name="PastHistroy">高血壓、糖尿病</textarea></div>
+</form></body></html>

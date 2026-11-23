@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Personal DB – Dashboard</title>
+  <link rel="stylesheet" href="../ui/common.css">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <aside class="nav">
+    <h1>Personal DB</h1>
+    <button data-view="patients" class="on">Patients</button>
+    <button data-view="import">Import</button>
+    <button data-view="export">Export</button>
+    <button data-view="mappings">Mappings</button>
+    <button data-view="settings">Settings & backup</button>
+    <p class="mut small" id="usage"></p>
+  </aside>
+  <main>
+    <section id="v-patients" class="view on">
+      <div class="head"><h2>Patients</h2><input id="q" placeholder="Search name or ID"></div>
+      <div id="plist"></div>
+      <div id="pview"></div>
+    </section>
+
+    <section id="v-import" class="view">
+      <h2>Import local files</h2>
+      <p class="mut">CSV · TSV · XLSX · Personal DB JSON/CSV/zip · FHIR JSON · saved HTML pages · images, audio, video, PDF. You see a preview before anything is imported.</p>
+      <label class="drop" id="drop"><input type="file" id="file" multiple hidden> Drop files here or <u>choose files</u></label>
+      <div id="imp"></div>
+    </section>
+
+    <section id="v-export" class="view">
+      <h2>Export</h2>
+      <div class="card">
+        <label>Patients <select id="expWho"><option value="">All patients</option></select></label>
+        <div class="row">
+          <button data-exp="csv" class="primary">CSV (5 columns)</button>
+          <button data-exp="json">JSON</button>
+          <button data-exp="fhir">FHIR R4 Bundle</button>
+          <label><input type="checkbox" id="expMedia" checked> include media (exports a .zip)</label>
+        </div>
+        <p class="mut small">CSV columns: patientId, label, value, time, source. time is "nan" for persistent labels, "YYYYMMDD" for dates and "YYYYMMDDHHmm" (UTC) for date-times.</p>
+      </div>
+    </section>
+
+    <section id="v-mappings" class="view">
+      <h2>Mappings</h2>
+      <p class="mut">Learned labels are shared by Capture and Fill. Templates point at elements on one site.</p>
+      <h3>Learned labels</h3>
+      <div id="aliases"></div>
+      <h3>Templates</h3>
+      <div id="templates"></div>
+      <div class="row"><button id="mapExport">Export mappings</button> <label class="btnlike">Import mappings <input type="file" id="mapImport" accept=".json" hidden></label></div>
+    </section>
+
+    <section id="v-settings" class="view">
+      <h2>Settings & backup</h2>
+      <div class="card" id="backupCard"></div>
+      <div class="card" id="aiCard"></div>
+      <div class="card">
+        <h3>Danger zone</h3>
+        <button id="wipe" class="danger">Delete all local data…</button>
+      </div>
+    </section>
+  </main>
+  <dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+
+  <script src="../lib/schema.js"></script>
+  <script src="../lib/core.js"></script>
+  <script src="../lib/db.js"></script>
+  <script src="../lib/dom.js"></script>
+  <script src="../lib/zip.js"></script>
+  <script src="../lib/crypto.js"></script>
+  <script src="../lib/export.js"></script>
+  <script src="../lib/backup.js"></script>
+  <script src="../vendor/xlsx.js"></script>
+  <script src="../ui/common.js"></script>
+  <script src="chart.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>

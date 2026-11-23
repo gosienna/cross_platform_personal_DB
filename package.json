@@ -1,0 +1,18 @@
+{
+  "name": "personal-db",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser extension that captures patient data into a 5-field personal database",
+  "scripts": {
+    "test": "TZ=Asia/Taipei node --test tests/*.test.js",
+    "check": "for f in $(find extension -name '*.js' -not -path '*/vendor/*'); do node --check \"$f\" || exit 1; done",
+    "build:vendor": "node scripts/build-vendor.mjs"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
+    "esbuild": "^0.28.2",
+    "fake-indexeddb": "^6.2.8",
+    "jsdom": "^26.0.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  }
+}
