@@ -12,8 +12,17 @@
   const MEDIA_LABELS = new Set(['Photo', 'Audio', 'Video', 'Screenshot', 'Attachment']);
   const isMediaRef = (v) => /^sha256:[0-9a-f]{64}$/.test(v);
 
-  const toJSON = (rows) => JSON.stringify({ format: 'personal-db', version: 1, fields: C().FIELDS, rows: rows.map(pick5) }, null, 1);
+  // JSON keeps where each value was read (page) and what it replaced (history), so a re-import keeps the values of
+  // different pages apart. CSV and FHIR carry the 5 fields only.
+  const toJSON = (rows) => JSON.stringify({ format: 'personal-db', version: 1, fields: C().FIELDS, rows: rows.map(pickJSON) }, null, 1);
   const pick5 = (r) => ({ patientId: r.patientId, label: r.label, value: r.value, time: r.time, source: r.source });
+  function pickJSON(r) {
+    const o = pick5(r);
+    if (r.page) o.page = String(r.page);
+    if (Array.isArray(r.history) && r.history.length) o.history = r.history.map((e) => ({ value: String(e.value ?? ''), page: String(e.page || ''), replacedAt: String(e.replacedAt || '') }));
+    if (r.edited) o.edited = String(r.edited);
+    return o;
+  }
 
   // ── FHIR ─────────────────────────────────────────────────────────────
   function fhirTime(t) {
@@ -182,7 +191,7 @@
     const text = await file.text();
     if (lower.endsWith('.json') || /^\s*[{[]/.test(text)) {
       const j = JSON.parse(text);
-      if (j.format === 'personal-db') return { kind: 'rows', rows: j.rows.map(pick5), media: [] };
+      if (j.format === 'personal-db') return { kind: 'rows', rows: j.rows.map(pickJSON), media: [] };
       if (j.resourceType === 'Bundle') return { kind: 'rows', rows: fromFHIR(j, source), media: [] };
       if (Array.isArray(j) && j[0] && 'patientId' in j[0]) return { kind: 'rows', rows: j.map(pick5), media: [] };
       throw new Error('Unknown JSON format');

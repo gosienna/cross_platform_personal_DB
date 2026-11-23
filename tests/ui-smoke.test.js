@@ -123,6 +123,15 @@ test('side panel: scan → preview (search, highlights switch) → save → fill
   assert.equal(w.document.querySelector('input.pid').value, 'A223456789');
   // a new page: read by a draft template from the built-in rules; every row shows where its time comes from
   assert.ok(w.document.querySelector('.pagebar.draft'), 'draft template banner');
+  // the outlines on the page carry a ✕ for values read by the template (outlines need layout, so the marks sent are checked)
+  {
+    const agent = page.dom.window.__pdbAgent, sent = [], orig = agent.setMarks;
+    agent.setMarks = (list) => { sent.push(...list); return orig(list); };
+    w.document.querySelector('#capMarks').click(); w.document.querySelector('#capMarks').click();
+    await tick(150);
+    agent.setMarks = orig;
+    assert.ok(sent.some((m) => m.x === 'cancel'), '✕ on the outlines of template values');
+  }
   assert.equal(w.document.querySelectorAll('#records .chip').length, 5);
   // the page got an overlay, but its own content is unchanged
   assert.ok(page.dom.window.document.getElementById('pdb-overlay-host'));
@@ -238,6 +247,8 @@ test('dashboard: Mappings shows a page template with its sample page, labels and
   const saved = (await w.PDB.db.getPageTemplates())[0];
   assert.equal(JSON.stringify(saved.fields.find((f) => f.label === 'Body weight').time), JSON.stringify({ mode: 'capture' }));
   assert.match(fieldRow('Body weight').textContent, /capture time ⚠/);
+  // the sample's boxes carry a ✕ that cancels a mapping at once (drawn only with layout, so tried directly here)
+  assert.ok(w.document.querySelector('#ptDetail .smp-layer'));
   // remove a mapping straight from the list, then bring it back
   [...fieldRow('Name').querySelectorAll('button')].find((b) => b.textContent === 'remove').click();
   await tick(200);
@@ -245,4 +256,64 @@ test('dashboard: Mappings shows a page template with its sample page, labels and
   [...fieldRow('Name').querySelectorAll('button')].find((b) => b.textContent === 'restore').click();
   await tick(200);
   assert.ok((await w.PDB.db.getPageTemplates())[0].fields.some((f) => f.label === 'Name'));
+});
+
+test('side panel: another page of the same site gives separate values; a different name is a change kept in history', async () => {
+  const p1 = tab('ltc-medicine.html', 'https://ltc.example/MEDICINE.ASP');
+  const a = await loadPage('sidepanel/sidepanel.html', p1);
+  a.w.document.querySelector('#scan').click();
+  await tick(500);
+  a.w.document.querySelector('#save').click();
+  await tick(400);
+  assert.match(a.w.document.querySelector('#status').textContent, /Saved 5 values/);
+
+  // the same record shown on another page, with a different spelling of the name
+  const html = fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', 'ltc-medicine.html'), 'utf8').replace(/測試丁/g, '測試戊');
+  const dom = new JSDOM(html, { url: 'https://ltc.example/HISTORY.ASP', runScripts: 'outside-only', pretendToBeVisual: true });
+  dom.window.chrome = { runtime: { sendMessage() {} } };
+  const b = await loadPage('sidepanel/sidepanel.html', { dom, url: 'https://ltc.example/HISTORY.ASP' }, { idb: a.w.indexedDB, storage: a.w.chrome.storage });
+  b.w.document.querySelector('#scan').click();
+  await tick(500);
+  assert.deepEqual(b.errors, []);
+  const D = b.w.document;
+  const byLabel = (l) => [...D.querySelectorAll('#records tbody tr')].filter((tr) => tr.querySelector('td.l') && tr.querySelector('td.l').textContent === l);
+  const badge = (tr) => [...tr.querySelectorAll('.badge')].map((x) => x.textContent).join(' ');
+  // medications from this page are new data points (not "already saved"), ticked
+  const meds = byLabel('Medication');
+  assert.equal(meds.length, 3);
+  assert.ok(meds.every((tr) => !/already saved/.test(badge(tr)) && tr.querySelector('input[type=checkbox]').checked));
+  // National ID is a common field: already saved. Name differs: a change, unticked, naming the page it was read on
+  assert.match(badge(byLabel('National ID')[0]), /already saved/);
+  const nameTr = byLabel('Name')[0];
+  assert.match(badge(nameTr), /測試丁 → new/);
+  assert.match(nameTr.querySelector('.badge.chg').title, /\/MEDICINE\.ASP/);
+  assert.equal(nameTr.querySelector('input[type=checkbox]').checked, false);
+  nameTr.querySelector('input[type=checkbox]').click();
+  D.querySelector('#save').click();
+  await tick(400);
+  assert.match(D.querySelector('#status').textContent, /Saved 4 values/);
+  const rows = await b.w.PDB.db.rowsByPatient('A223456789');
+  assert.equal(rows.filter((r) => r.label === 'Medication').length, 6);
+  const name = rows.filter((r) => r.label === 'Name');
+  assert.equal(name.length, 1);
+  assert.equal(name[0].value, '測試戊');
+  assert.deepEqual(name[0].history.map((e) => [e.value, e.page]), [['測試丁', '/MEDICINE.ASP']]);
+
+  // dashboard: the change is shown on the patient card, with an edit button; pages are listed; Common fields card renders
+  const d = await loadPage('dashboard/dashboard.html', null, { idb: a.w.indexedDB, storage: a.w.chrome.storage });
+  assert.deepEqual(d.errors, []);
+  await tick(300);
+  [...d.w.document.querySelectorAll('#plist tbody tr')][0].click();
+  await tick(300);
+  const view = d.w.document.querySelector('#pview');
+  const chg = [...view.querySelectorAll('.kv .badge.chg')].find((x) => /differs by page/.test(x.textContent));
+  assert.ok(chg && /測試丁 \(\/MEDICINE\.ASP\)/.test(chg.title) && /測試戊 \(\/HISTORY\.ASP\)/.test(chg.title));
+  assert.ok(view.querySelector('.kv button.link'), 'edit button on a common field');
+  assert.ok([...view.querySelectorAll('td.mono')].some((td) => td.textContent === '/HISTORY.ASP'));
+  d.w.document.querySelector('[data-view="settings"]').click();
+  await tick(300);
+  const common = d.w.document.querySelector('#commonCard');
+  assert.match(common.textContent, /Common fields/);
+  const nameBox = [...common.querySelectorAll('label')].find((l) => l.textContent.trim() === 'Name');
+  assert.ok(nameBox && nameBox.querySelector('input').checked);
 });

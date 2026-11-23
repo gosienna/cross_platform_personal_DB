@@ -22,6 +22,7 @@
     };
     const view = { doc: null, scale: 1, hot: null, pick: null };
     const units = () => [...tpl.fields, ...tpl.tables];
+    const off = (u) => (u.kind === 'table' ? !!u.ignored : u.label === PT.IGNORE);
     const isSource = (u) => units().some((x) => x.time && x.time.mode === 'field' && x.time.field === u.id && x.id !== u.id);
     const roleClass = (u) => (u.kind === 'table' ? (u.ignored ? 'ignored' : 'table') : u.label === PT.IGNORE ? 'ignored' : u.role === 'time' || u.role === 'recordDate' || isSource(u) ? 'time' : u.unmapped ? 'unmapped' : u.role === 'identity' ? 'identity' : 'data');
     const nameOf = (u) => (u.kind === 'table' ? `Table: ${(u.map.layout === 'chart' ? u.map.rows.map((r) => r.header) : u.map.columns.map((c) => c.header)).filter(Boolean).slice(0, 4).join(' | ')}` : PT.fieldName(u));
@@ -74,6 +75,20 @@
       }
       return { x, y, w, h: hh };
     };
+    /** ✕ on a box: cancel this mapping at once (left out; ↺ brings it back). */
+    function quickToggle(u) {
+      const isOff = off(u);
+      return h('button', { class: 'x', type: 'button', title: isOff ? 'Read this again' : 'Cancel this mapping (not saved any more; ↺ brings it back)',
+        onclick: (e) => {
+          e.stopPropagation();
+          if (view.pick) return;
+          run(() => {
+            if (isOff) { PT.restoreUnit(tpl, u.id); return save(`“${nameOf(u)}” is read again.`); }
+            PT.removeUnit(tpl, u.id);
+            return save(`Cancelled “${nameOf(u)}”: it is not saved any more.`);
+          });
+        } }, isOff ? '↺' : '✕');
+    }
     function draw() {
       layer.textContent = ''; boxes.clear();
       const doc = view.doc;
@@ -89,7 +104,7 @@
         const tt = PT.timeText(tpl, u);
         const div = h('div', { class: `smp-box ${roleClass(u)}`, style: `left:${r.x - 2}px;top:${r.y - 2}px;width:${r.w + 4}px;height:${r.h + 4}px`,
           onmouseenter: () => setHot(u.id), onmouseleave: () => setHot(null), onclick: () => run(() => (view.pick ? null : editUnit(u))) },
-          h('span', { class: 'tag' }, `${nameOf(u)}${u.label === PT.IGNORE ? ' (not saved)' : ''}${u.kind !== 'table' && tt.mode !== 'nan' ? ` · ⏱ ${tt.text}` : ''}`));
+          h('span', { class: 'tag' }, `${nameOf(u)}${off(u) ? ' (not saved)' : ''}${u.kind !== 'table' && tt.mode !== 'nan' ? ` · ⏱ ${tt.text}` : ''}`, quickToggle(u)));
         layer.append(div);
         boxes.set(u.id, { el, r, div });
       }
@@ -178,7 +193,6 @@
       return h('span', { class: 'chip' + (tt.warn ? ' warn' : '') }, `⏱ ${tt.text}${tt.warn ? ' ⚠' : ''}`);
     };
     const list = h('tbody');
-    const off = (u) => (u.kind === 'table' ? !!u.ignored : u.label === PT.IGNORE);
     /** Row buttons: edit · remove (left out, known) or restore · delete (erased from the template). */
     function actions(u) {
       const btn = (text, title, fn, cls = 'link') => h('button', { class: cls, title, onclick: (e) => { e.stopPropagation(); run(fn); } }, text);

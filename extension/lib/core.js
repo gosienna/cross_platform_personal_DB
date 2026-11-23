@@ -2,7 +2,10 @@
  * Core logic (no DOM): label matching, value/time parsing, table analysis,
  * record → 5-field rows, dedup, identity matching.
  *
- * Unified row: { patientId, label, value, time, source }
+ * Unified row: { patientId, label, value, time, source }   (+ page, history: stored locally, never in CSV/FHIR)
+ *   page = normalised path of the page the value was read from (record-number segments → *)
+ *   Values from different pages are different data points (page is part of the row key), except for
+ *   "common" labels (Name, National ID, …): one value per (patientId, label, time, source).
  *   time = "nan"            persistent label
  *        | "YYYYMMDD"       date only (local calendar date, no timezone shift)
  *        | "YYYYMMDDHHmm"   UTC date-time
@@ -620,7 +623,7 @@
       const k = `${it.label}|${time}|${it.value}`;
       // the same value read twice (e.g. by two template fields): one row, which knows every field it stands for
       if (seen.has(k)) { const r0 = seen.get(k); if (it.fid && it.fid !== r0._item.fid) (r0._fids = r0._fids || [r0._item.fid]).push(it.fid); continue; }
-      const row = { label: it.label, value: it.value, time, source, _item: it };
+      const row = { label: it.label, value: it.value, time, source, page: it.page || '', _item: it };
       seen.set(k, row);
       const sk = `${it.label}|${time}`;
       if (!isMulti(it.label)) { if (slot.has(sk)) row._conflictWith = slot.get(sk); else slot.set(sk, it.value); }
@@ -631,26 +634,88 @@
     for (const s of sys) {
       const d = dia.find((x) => x.time === s.time);
       if (!d) continue;
-      rows.splice(rows.indexOf(s), 1, { label: 'Blood pressure', value: `${s.value}/${d.value}`, time: s.time, source, _item: { ...s._item, label: 'Blood pressure' } });
+      rows.splice(rows.indexOf(s), 1, { label: 'Blood pressure', value: `${s.value}/${d.value}`, time: s.time, source, page: s.page, _item: { ...s._item, label: 'Blood pressure' } });
       rows.splice(rows.indexOf(d), 1);
     }
     for (const m of rec.meds) {
-      rows.push({ label: 'Medication', value: medValue(m.fields), time: m.start ? formatTime(m.start) : fallback, source, _item: { label: 'Medication', rawLabel: 'Medication', ref: m.ref, region: m.region, entry: S().byKey.medication, fid: m.fid, fp: m.fp } });
+      rows.push({ label: 'Medication', value: medValue(m.fields), time: m.start ? formatTime(m.start) : fallback, source, page: m.page || (rec.items[0] && rec.items[0].page) || '', _item: { label: 'Medication', rawLabel: 'Medication', ref: m.ref, region: m.region, entry: S().byKey.medication, fid: m.fid, fp: m.fp } });
     }
     return rows;
   }
 
   // ── storage keys, dedup, identity ────────────────────────────────────
   const isMulti = (label) => !!(S().byLabel[label] && S().byLabel[label].multi);
-  const rowKey = (r) => [r.patientId, r.label, r.time, r.source].concat(isMulti(r.label) ? [r.value] : []).join('␟');
+  /** Normalised page path: record-number segments become * (no record numbers stored, one template per form). */
+  /**
+   * A path part that is a record ID: 4 or more digits in a row (as before), a UUID ("627b1aea-f265-4d5d-93d8-09ebba15fbda",
+   * which may have no 4 digits in a row), a long hex string, or a long letters-and-digits token ("a8F3kq92LmZ01x").
+   */
+  const isIdSegment = (seg) => {
+    let s = seg;
+    try { s = decodeURIComponent(seg); } catch (e) { /* keep as is */ }
+    return /\d{4,}/.test(s)
+      || /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(s)
+      || /^[0-9a-f]{16,}$/i.test(s)
+      || (s.length >= 12 && /^[A-Za-z0-9_-]+$/.test(s) && /[A-Za-z]/.test(s) && (s.match(/\d/g) || []).length >= 3);
+  };
+  const pagePath = (p) => String(p || '').split('/').map((seg, i) => (i > 0 && seg && isIdSegment(seg) ? '*' : seg)).join('/');
+  /**
+   * The part of an address's query that picks the page (?func=profile&tab=2), without record IDs and cache-busters.
+   * Pages on one path told apart by it get their own templates.
+   */
+  function queryKey(search) {
+    const out = [];
+    for (const [k, v] of new URLSearchParams(String(search || '').replace(/^\?/, ''))) {
+      if (!v || v.length > 40 || isIdSegment(v) || /^\d+$/.test(v) || /^(_|t|ts|time|timestamp|rnd|rand|random|nocache|cache|v|ver|token|sid|session)$/i.test(k)) continue;
+      out.push(`${k}=${v}`);
+    }
+    return [...new Set(out)].sort().join('&');
+  }
 
-  /** Compare new rows to existing rows → status 'new' | 'duplicate' | 'changed' (with old value). */
+  // Common labels: do not change with time or between pages of one system → one value per (patient, label, source).
+  const defaultCommonLabels = () => S().VOCAB.filter((e) => e.persistent).map((e) => e.label);
+  let _common = null; // user list, or null = defaults
+  let _commonSet = null, _commonFor = null;
+  function setCommonLabels(list) { _common = Array.isArray(list) ? [...list] : null; _commonSet = null; }
+  const commonLabels = () => (_common ? [..._common] : defaultCommonLabels());
+  function isCommon(label) {
+    if (!_commonSet || _commonFor !== S()) { _commonSet = new Set(commonLabels()); _commonFor = S(); }
+    return _commonSet.has(label);
+  }
+  /**
+   * Storage key. A row with no page (saved before pages were recorded, or imported from a file) keeps the key it had:
+   * the page part is only added when there is a page.
+   */
+  const rowKey = (r) => [r.patientId, r.label, r.time, r.source]
+    .concat(isMulti(r.label) ? [r.value] : [])
+    .concat(!isCommon(r.label) && r.page ? ['@' + r.page] : [])
+    .join('␟');
+
+  /** Lookup key for "some page already stored this exact value" (rows from files carry no page). */
+  const sameValueKey = (r) => rowKey(r) + '␟=' + r.value;
+
+  /** Values a stored row had before → kept when it is replaced. Oldest first, no repeats, at most HISTORY_MAX. */
+  const HISTORY_MAX = 20;
+  function withHistory(old, incoming, replacedAt = utcStamp(new Date())) {
+    const h = [...((old && old.history) || []), ...((incoming && incoming.history) || [])];
+    if (old && incoming && old.value !== incoming.value) h.push({ value: old.value, page: old.page || '', replacedAt });
+    const seen = new Set(), out = [];
+    for (const e of h) {
+      const k = `${e.value}␟${e.page || ''}␟${e.replacedAt || ''}`;
+      if (seen.has(k)) continue;
+      seen.add(k); out.push({ value: String(e.value ?? ''), page: e.page || '', replacedAt: e.replacedAt || '' });
+    }
+    return out.slice(-HISTORY_MAX);
+  }
+
+  /** Compare new rows to existing rows → status 'new' | 'duplicate' | 'changed' (with the old value and its page). */
   function diffRows(newRows, existingByKey) {
     return newRows.map((r) => {
+      if (existingByKey.has(sameValueKey(r))) return { ...r, status: 'duplicate' };
       const old = existingByKey.get(rowKey(r));
       if (!old) return { ...r, status: 'new' };
       if (old.value === r.value) return { ...r, status: 'duplicate' };
-      return { ...r, status: 'changed', oldValue: old.value };
+      return { ...r, status: 'changed', oldValue: old.value, oldPage: old.page || '' };
     });
   }
 
@@ -716,6 +781,7 @@
     newRecord, specFor, addPair, addMapped, addStacked, analyzeTable, listMap, applyList, chartMap, applyChart,
     recordFromPairs, mergeRecords, recordToRows, isEmptyValue, joinLines,
     rowKey, isMulti, diffRows, buildIdentityIndex, resolveIdentity,
+    pagePath, queryKey, isIdSegment, sameValueKey, defaultCommonLabels, setCommonLabels, commonLabels, isCommon, withHistory, HISTORY_MAX,
     FIELDS, toCSV, parseCSV, gridFromArrays,
     _resetIndex: () => { _idx = null; },
   };

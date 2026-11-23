@@ -227,7 +227,7 @@
   }
 
   /** Normalised page path: record-number segments become * so one template covers every record of a form. */
-  const pagePath = (p) => String(p || '').replace(/\/(?=[^/]*\d{4,})[^/]+/g, '/*');
+  const pagePath = (p) => PDB.core.pagePath(p);
   /** Does a template apply to the document at this path? (Old templates without framePath apply everywhere.) */
   const appliesTo = (t, path) => !t.framePath || pagePath(path) === t.framePath;
 

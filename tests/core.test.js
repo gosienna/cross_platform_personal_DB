@@ -94,3 +94,45 @@ test('generic CSV vitals sheet → analyzeTable list', () => {
   const rows = C.recordToRows(recs[0], { source: 'file:x.csv', captureTime: '202611230000' });
   assert.deepEqual(rows.filter((r) => r.label === 'Blood pressure').map((r) => [r.value, r.time]), [['120/80', '202611010000'], ['118/76', '202611010400']]);
 });
+
+test('row key: values from different pages are different data points, except common labels', () => {
+  const base = { patientId: 'A1', source: 'https://h', time: '202611010000' };
+  const t = (page) => ({ ...base, label: 'Body temperature', value: '37', page });
+  assert.notEqual(C.rowKey(t('/summary')), C.rowKey(t('/vitals')));
+  // a row without a page keeps the key it had before pages were recorded
+  assert.equal(C.rowKey(t('')), ['A1', 'Body temperature', '202611010000', 'https://h'].join('␟'));
+  const n = (page) => ({ ...base, label: 'Name', value: 'X', time: 'nan', page });
+  assert.equal(C.rowKey(n('/summary')), C.rowKey(n('/vitals')));
+  // diff: another page → new; a common field that differs on another page → changed, naming the stored page
+  const existing = new Map([[C.rowKey(t('/summary')), t('/summary')], [C.rowKey(n('/summary')), n('/summary')]]);
+  const out = C.diffRows([{ ...t('/vitals'), value: '38' }, { ...n('/vitals'), value: 'Y' }], existing);
+  assert.deepEqual(out.map((r) => r.status), ['new', 'changed']);
+  assert.equal(out[1].oldPage, '/summary');
+});
+
+test('common labels: defaults are the persistent labels; a user list replaces them', () => {
+  assert.ok(C.isCommon('Name') && C.isCommon('National ID') && C.isCommon('Birth date'));
+  assert.ok(!C.isCommon('Body temperature'));
+  C.setCommonLabels(['Body temperature']);
+  try {
+    assert.ok(C.isCommon('Body temperature') && !C.isCommon('Name'));
+    assert.equal(C.rowKey({ patientId: 'A', label: 'Body temperature', time: 't', source: 's', page: '/a' }), C.rowKey({ patientId: 'A', label: 'Body temperature', time: 't', source: 's', page: '/b' }));
+  } finally { C.setCommonLabels(null); }
+  assert.ok(C.isCommon('Name'));
+});
+
+test('page path: record numbers in the path are masked', () => {
+  assert.equal(C.pagePath('/case/A123456789/vitals'), '/case/*/vitals');
+  assert.equal(C.pagePath('/MEDICINE.ASP'), '/MEDICINE.ASP');
+  assert.equal(PDB.templates.pagePath('/p/20261123'), '/p/*');
+});
+
+test('history: replaced values are kept in order, without repeats, at most HISTORY_MAX', () => {
+  const h1 = C.withHistory({ value: '70', page: '/a' }, { value: '72', page: '/b' }, '202611240000');
+  assert.deepEqual(h1, [{ value: '70', page: '/a', replacedAt: '202611240000' }]);
+  assert.deepEqual(C.withHistory({ value: '72', history: h1 }, { value: '72', history: h1 }), h1, 'same value: nothing added');
+  let old = { value: '0', history: [] };
+  for (let i = 1; i <= C.HISTORY_MAX + 5; i++) old = { value: String(i), history: C.withHistory(old, { value: String(i) }, String(i)) };
+  assert.equal(old.history.length, C.HISTORY_MAX);
+  assert.equal(old.history[old.history.length - 1].value, String(C.HISTORY_MAX + 4));
+});

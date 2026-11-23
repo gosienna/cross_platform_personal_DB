@@ -42,13 +42,16 @@
     const rows = (await DB.rowsByPatient(pid)).sort((a, b) => (b.time === 'nan' ? '9' : b.time).localeCompare(a.time === 'nan' ? '9' : a.time));
     const view = $('#pview');
     view.textContent = '';
-    // persistent fields (conflicting values from different sources are all shown)
+    // persistent fields (conflicting values from different sources are all shown; common fields can be edited)
     const persist = {};
     for (const r of rows.filter((x) => x.time === 'nan')) (persist[r.label] = persist[r.label] || []).push(r);
     const kv = h('div', { class: 'kv' });
     for (const [l, rs] of Object.entries(persist)) {
       const vals = [...new Set(rs.map((r) => r.value))];
-      kv.append(h('div', { class: 'k' }, l), h('div', {}, vals.join(' · '), vals.length > 1 ? h('span', { class: 'badge warn', title: rs.map((r) => `${r.value} (${r.source})`).join('\n') }, ' differs by source') : null, l === 'MRN' ? h('span', { class: 'mut small' }, `  ${rs.map((r) => r.source).join(', ')}`) : null));
+      const per = rs.map((r) => h('span', { class: 'pv' }, r.value, historyBadge(r), C.isCommon(r.label) ? editButton(r) : null));
+      kv.append(h('div', { class: 'k' }, l), h('div', {}, per.flatMap((x, i) => (i ? [' · ', x] : [x])),
+        vals.length > 1 ? h('span', { class: 'badge warn', title: rs.map((r) => `${r.value} (${r.source}${r.page ? ' ' + r.page : ''})`).join('\n') }, rs.some((a) => rs.some((b) => a.source !== b.source && a.value !== b.value)) ? ' differs by source' : ' differs by page') : null,
+        l === 'MRN' ? h('span', { class: 'mut small' }, `  ${rs.map((r) => r.source).join(', ')}`) : null));
     }
     view.append(h('div', { class: 'card' },
       h('div', { class: 'row', style: 'justify-content:space-between' }, h('h3', { style: 'margin:0' }, (persist.Name && persist.Name[0].value) || pid, h('span', { class: 'mut mono small' }, '  ' + pid)),
@@ -100,7 +103,9 @@
       for (const r of rows.filter((x) => !lf.value || x.label === lf.value)) {
         const k = C.rowKey(r);
         const cb = h('input', { type: 'checkbox', checked: sel.has(k), onchange: () => (cb.checked ? sel.add(k) : sel.delete(k)) });
-        tb.append(h('tr', {}, h('td', {}, cb), h('td', {}, r.label), h('td', {}, X.isMediaRef(r.value) ? h('span', { class: 'mono' }, r.value.slice(0, 18) + '…') : r.value), h('td', { class: 'mut small' }, r.time === 'nan' ? 'nan' : C.displayTime(r.time)), h('td', { class: 'mut small' }, r.source)));
+        tb.append(h('tr', {}, h('td', {}, cb), h('td', {}, r.label),
+          h('td', {}, X.isMediaRef(r.value) ? h('span', { class: 'mono' }, r.value.slice(0, 18) + '…') : r.value, historyBadge(r), C.isCommon(r.label) && !X.isMediaRef(r.value) ? editButton(r) : null),
+          h('td', { class: 'mut small' }, r.time === 'nan' ? 'nan' : C.displayTime(r.time)), h('td', { class: 'mut small' }, r.source), h('td', { class: 'mut small mono' }, r.page || '')));
       }
     };
     fill();
@@ -110,7 +115,32 @@
         if (!del.length || !confirm(`Delete ${del.length} values? This cannot be undone.`)) return;
         await DB.deleteRows(del); renderPatients();
       } }, 'Delete selected')),
-      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['', 'Label', 'Value', 'Time (local)', 'Source'].map((x) => h('th', {}, x)))), tb)));
+      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, ['', 'Label', 'Value', 'Time (local)', 'Source', 'Page'].map((x) => h('th', {}, x)))), tb)));
+  }
+
+  /** "differs by page" / "edited" badge for a row that replaced earlier values; the tooltip lists them in order. */
+  function historyBadge(r) {
+    const hist = (r.history || []).filter((e) => e.value !== r.value || (e.page || '') !== (r.page || ''));
+    if (!hist.length && !r.edited) return null;
+    const at = (e) => (e.page ? ` (${e.page})` : '');
+    const lines = [...hist.map((e) => `${e.value}${at(e)}${e.replacedAt ? ' · replaced ' + C.displayTime(e.replacedAt) : ''}`), `→ ${r.value}${at(r)}${r.edited ? ' · edited ' + C.displayTime(r.edited) : ''}`];
+    const pages = new Set([...hist.map((e) => e.page || ''), r.page || ''].filter(Boolean));
+    const text = r.edited && !hist.some((e) => e.value !== r.value) ? ' edited' : pages.size > 1 ? ' differs by page' : ' changed';
+    return h('span', { class: 'badge chg', title: lines.join('\n') }, text);
+  }
+  function editButton(r) {
+    return h('button', { class: 'link small', title: 'Edit this value (the old value is kept in its history)', onclick: () => editDialog(r) }, '✎');
+  }
+  async function editDialog(row) {
+    let value = null;
+    const r = await modal((f) => {
+      const inp = h('input', { value: row.value, style: 'width:100%' });
+      f.append(h('b', {}, `Edit ${row.label}`), h('p', { class: 'small mut' }, `${row.source}${row.page ? ' · ' + row.page : ''}. The current value is kept in the history.`), inp,
+        h('div', { class: 'btns' }, h('button', { value: '' }, 'Cancel'), h('button', { class: 'primary', value: 'ok', onclick: () => { value = inp.value.trim(); } }, 'Save')));
+    });
+    if (r !== 'ok' || value == null || value === row.value) return;
+    await DB.editValue(row, value);
+    renderPatients();
   }
 
   async function mergeDialog(from) {
@@ -377,6 +407,7 @@
       h('div', { class: 'row' }, h('button', { class: 'primary', disabled: !clientIdSet, onclick: backupNow }, 'Back up now'), h('button', { disabled: !clientIdSet, onclick: restoreDialog }, 'Restore from Drive…')));
     // AI
     const ai = s.ai, pr = s.privacy;
+    renderCommon();
     const aiCard = $('#aiCard');
     aiCard.textContent = '';
     const aiEn = h('input', { type: 'checkbox', checked: ai.enabled });
@@ -400,6 +431,38 @@
         renderSettings();
       } }, 'Save')),
       h('details', {}, h('summary', {}, `Audit log: what was sent (${log.length})`), log.map((e) => h('div', { class: 'card small' }, h('div', { class: 'mut' }, `${new Date(e.at).toLocaleString()} · ${e.source}`), h('pre', { class: 'mono', style: 'white-space:pre-wrap;max-height:200px;overflow:auto' }, e.text), e.image ? h('img', { src: e.image, style: 'max-width:300px' }) : null))));
+  }
+  /**
+   * Common fields: labels that do not change with time or between pages of one system (Name, National ID, …). They keep
+   * one value per patient and site; every other label keeps a separate value for each page it was read on.
+   */
+  async function renderCommon() {
+    const card = $('#commonCard');
+    card.textContent = '';
+    const v = await DB.getVocab();
+    const stored = (await DB.allRows()).map((r) => r.label);
+    const learned = Object.values(v.aliases).map((a) => a.label).filter((l) => l && l !== '__ignore__');
+    const labels = [...new Set([...vocabLabels(), ...learned, ...stored])].filter((l) => !MEDIA.has(l) && !C.isMulti(l));
+    const on = new Set(C.commonLabels());
+    const boxes = new Map();
+    const list = h('div', { class: 'checks' }, labels.map((l) => {
+      const cb = h('input', { type: 'checkbox', checked: on.has(l) });
+      boxes.set(l, cb);
+      return h('label', { class: 'small', style: 'display:inline-block;min-width:160px' }, cb, ' ', l);
+    }));
+    const out = h('p', { class: 'small' });
+    const apply = async (list) => {
+      const res = await DB.setCommonLabels(list);
+      out.textContent = `Saved. ${res.rows} values stored${res.merged ? `; ${res.merged} values from different pages were combined (the others are kept in the history)` : ''}.`;
+      renderCommon().then(() => card.append(out));
+    };
+    card.append(h('h3', { style: 'margin-top:0' }, 'Common fields'),
+      h('p', { class: 'mut small' }, 'Values read on different pages are kept as separate values. Ticked fields are the exception: they should be the same on every page of a system (name, ID, birth date…), so each patient keeps one value per site, a different value on another page is shown as a change, and you can edit it on the patient card.'),
+      list,
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: () => apply(labels.filter((l) => boxes.get(l).checked).concat([...on].filter((l) => !boxes.has(l)))) }, 'Save'),
+        ' ', h('button', { onclick: () => { if (confirm('Use the default common fields?')) apply(null); } }, 'Reset to defaults')),
+      out);
   }
   async function setPassphrase() {
     let p1 = '', p2 = '';

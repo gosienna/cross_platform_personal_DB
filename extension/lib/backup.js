@@ -45,12 +45,12 @@
 
   /**
    * Page templates and their (masked) sample pages from a backup or a mappings file.
-   * replace: the backup's templates only; merge: a page's newer template wins.
+   * replace: the backup's templates only; merge: the newer version of each template wins.
    */
   async function restoreMappings(snap, mode) {
     if (!snap.pageTemplates) return;
     const mine = mode === 'replace' ? [] : await PDB.db.getPageTemplates();
-    const key = (t) => `${t.origin}|${t.framePath}`;
+    const key = (t) => t.id; // several templates can share one address
     const by = new Map(mine.map((t) => [key(t), t]));
     for (const t of snap.pageTemplates) { const cur = by.get(key(t)); if (!cur || (t.updatedAt || 0) > (cur.updatedAt || 0)) by.set(key(t), t); }
     const list = [...by.values()];

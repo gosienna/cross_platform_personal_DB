@@ -292,3 +292,74 @@ test('remove (left out, known) → restore; delete erases it and moves values ti
   assert.ok(!res.records.flatMap((r) => r.items).some((i) => i.label === 'Body temperature'));
   assert.ok(!PT.uncovered(list, lt, res, CTX).some((u) => u.unit.kind === 'table'));
 });
+
+test('page path: record IDs of any form become *, so every record of a form shares one template', () => {
+  const P = PDB.templates.pagePath;
+  for (const id of ['73b61871-2297-48e7-9b14-3e0c4584533b', '854dbcc2-d6a8-4925-8cdb-6c4739679d43', '627b1aea-f265-4d5d-93d8-09ebba15fbda'])
+    assert.equal(P(`/v2/patients/${id}/profile`), '/v2/patients/*/profile', id);
+  assert.equal(P('/api/case/5f1d7c2ab8e94a0012cd34ef/view'), '/api/case/*/view'); // hex object id
+  assert.equal(P('/lcms/fh/showFh200v2/12345678'), '/lcms/fh/showFh200v2/*'); // as before
+  assert.equal(P('/MEASURE.ASP'), '/MEASURE.ASP');
+  assert.equal(P('/v2/patients/list'), '/v2/patients/list');
+  assert.equal(P('/residents/profile-overview'), '/residents/profile-overview');
+});
+
+// ── which template is this page: layout + address ─────────────────────
+const formHtml = (name, extra = '') => `<body><table>
+  <tr><th>姓名</th><td>${name}</td></tr><tr><th>性別</th><td>女</td></tr><tr><th>出生日期</th><td>1950-01-02</td></tr>
+  <tr><th>電話</th><td>07-1234567</td></tr><tr><th>地址</th><td>高雄市</td></tr>${extra}</table></body>`;
+const medsHtml = `<body><table><tr><th>藥品名稱</th><th>劑量</th><th>頻率</th><th>開始日期</th></tr>
+  <tr><td>Aspirin 100mg</td><td>1 粒</td><td>QD</td><td>2026/10/01</td></tr></table></body>`;
+function savedFrom(html, path, query = '') {
+  const doc = new JSDOM(html).window.document;
+  return { ...PT.draft(doc, rulesOf(doc), { origin: SRC, framePath: path, query }), complete: true };
+}
+
+test('match: the same form at an address that was never seen is found by its layout', () => {
+  const profile = savedFrom(formHtml('測試甲'), '/v2/patients/*/profile');
+  const meds = savedFrom(medsHtml, '/v2/patients/*/meds');
+  const doc = new JSDOM(formHtml('測試乙')).window.document;
+  const m = PT.match(doc, [meds, profile], { path: '/v2/patients/abc-unknown/profile', query: '' }, CTX);
+  assert.equal(m.decision, 'use');
+  assert.equal(m.tpl.id, profile.id);
+  assert.equal(m.how, 'layout');
+  assert.ok(m.found >= m.total * 0.7);
+  // remembered for that address: matched by address next time
+  assert.ok(PT.rememberAddress(profile, { path: '/v2/patients/abc-unknown/profile', query: '' }));
+  assert.equal(PT.match(doc, [meds, profile], { path: '/v2/patients/abc-unknown/profile', query: '' }, CTX).how, 'address');
+});
+
+test('match: two pages on one path, told apart by layout and by the query that picks the page', () => {
+  const profile = savedFrom(formHtml('測試甲'), '/index.asp', 'func=profile');
+  const meds = savedFrom(medsHtml, '/index.asp', 'func=meds');
+  const pMeds = PT.match(new JSDOM(medsHtml).window.document, [profile, meds], { path: '/index.asp', query: 'func=meds' }, CTX);
+  assert.equal(pMeds.tpl.id, meds.id);
+  const pProf = PT.match(new JSDOM(formHtml('測試丙')).window.document, [profile, meds], { path: '/index.asp', query: 'func=profile' }, CTX);
+  assert.equal(pProf.tpl.id, profile.id);
+  assert.equal(C.queryKey('?func=meds&id=627b1aea-f265-4d5d-93d8-09ebba15fbda&_=1732300000&pid=12345'), 'func=meds');
+});
+
+test('match: an unrelated page is a new page; a half-matching one is asked about', () => {
+  const profile = savedFrom(formHtml('測試甲'), '/a/profile');
+  const other = new JSDOM('<body><table><tr><th>護理問題</th><td>跌倒</td></tr><tr><th>措施</th><td>床欄</td></tr></table></body>').window.document;
+  assert.equal(PT.match(other, [profile], { path: '/b/notes', query: '' }, CTX).decision, 'none');
+  // the same form with half of its rows gone (another version of the system)
+  const half = new JSDOM('<body><table><tr><th>姓名</th><td>測試乙</td></tr><tr><th>性別</th><td>男</td></tr><tr><th>出生日期</th><td>1951-02-03</td></tr><tr><th>職業</th><td>無</td></tr><tr><th>宗教</th><td>無</td></tr></table></body>').window.document;
+  const m = PT.match(half, [profile], { path: '/c/profile', query: '' }, CTX);
+  assert.equal(m.decision, 'ask');
+  // an older template with taught fields only is used by address (completed from the rules)
+  const old = { ...profile, id: 'pt-old', complete: false, framePath: '/b/notes' };
+  assert.equal(PT.match(other, [old], { path: '/b/notes', query: '' }, CTX).decision, 'partial');
+});
+
+test('match: a measurement list matches its own template, and not a list with the same columns for another measurement', () => {
+  const temp = savedFrom(fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', 'ltc-measure-temp.html'), 'utf8'), '/MEASURE.ASP', 'type=temp');
+  const doc = fixture('ltc-measure-temp.html');
+  assert.equal(PT.match(doc, [temp], { path: '/other', query: '' }, CTX).decision, 'use');
+  // the same page with a glucose heading: the value column means something else
+  const glu = fixture('ltc-measure-temp.html');
+  for (const n of glu.querySelectorAll('h1,h2,h3,h4,.title,legend,caption')) if (/體溫/.test(n.textContent)) n.textContent = n.textContent.replace(/體溫/g, '血糖');
+  const w = glu.createTreeWalker(glu.body, 4);
+  for (let t = w.nextNode(); t; t = w.nextNode()) if (/體溫/.test(t.nodeValue) && !t.parentElement.closest('table')) t.nodeValue = t.nodeValue.replace(/體溫/g, '血糖');
+  assert.notEqual(PT.match(glu, [temp], { path: '/other', query: '' }, CTX).decision, 'use');
+});

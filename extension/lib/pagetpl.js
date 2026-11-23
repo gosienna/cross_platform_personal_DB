@@ -118,7 +118,7 @@
     const reg = ex.registry;
     const base = opts.base || null;
     const tpl = { id: base ? base.id : newId('pt-'), v: 2, origin: opts.origin || (base && base.origin) || '', framePath: opts.framePath || (base && base.framePath) || '',
-      title: opts.title || (base && base.title) || '', complete: false, createdAt: (base && base.createdAt) || Date.now(), updatedAt: Date.now(), fields: [], tables: [] };
+      query: opts.query != null ? opts.query : (base && base.query) || '', title: opts.title || (base && base.title) || '', complete: false, createdAt: (base && base.createdAt) || Date.now(), updatedAt: Date.now(), fields: [], tables: [] };
     const els = opts.els || new Map(), values = opts.values || new Map();
     const regionOf = new Map(ex.regions.filter((r) => r.ref != null).map((r) => [r.ref, r]));
     return T().session(doc, () => {
@@ -315,6 +315,80 @@
       out.push({ unit: f, value: values.get(f.id), ref: reg.id(el) });
     }
     return out;
+  }
+
+  // ── which template is this page? (layout first, address second) ─────
+  const USE = 0.7, ASK = 0.4; // share of a template's fields found on the page: use it / ask whether it is this page
+  const parseQ = (q) => new Map(String(q || '').split('&').filter(Boolean).map((x) => { const i = x.indexOf('='); return [x.slice(0, i), x.slice(i + 1)]; }));
+  /** How well an address fits a template (0–1): same page path, and the same values for the query keys that pick the page. */
+  function addressScore(t, page) {
+    let best = 0;
+    for (const a of [{ path: t.framePath, query: t.query || '' }, ...(t.addresses || [])]) {
+      if (a.path !== page.path) continue;
+      const want = parseQ(a.query), have = parseQ(page.query);
+      let sc = 1;
+      for (const [k, v] of want) sc -= !have.has(k) ? 0.2 : have.get(k) !== v ? 0.6 : 0;
+      for (const k of have.keys()) if (!want.has(k)) sc -= 0.1;
+      best = Math.max(best, sc);
+    }
+    return Math.max(0, best);
+  }
+  /** Share of a template's fields and tables found on the page by their position and the text before them (label text alone is not enough). */
+  function layoutScore(doc, t, ctx, quick) {
+    let found = 0, total = 0;
+    for (const f of t.fields) {
+      total++;
+      if (quick) { let el = null; try { el = doc.querySelector(f.selector); } catch (e) { el = null; } if (el) found++; continue; }
+      if (T().place(doc, { ...f, anchor: null }, 'extract', false, ctx).el) found++;
+    }
+    for (const tb of t.tables) { total += 2; const el = findTable(doc, tb); if (el && sameMeaning(el, tb)) found += 2; }
+    return { found, total, score: total ? found / total : 0 };
+  }
+  /**
+   * A list whose value column takes its meaning from the page heading ("數據" under "體溫測量") is only the same list
+   * when the heading names the same measurement (a glucose list is not a temperature list with the same columns).
+   */
+  function sameMeaning(el, tb) {
+    const gen = tb.map.layout === 'list' ? tb.map.columns.find((c) => c.kind === 'generic' && c.spec && c.spec.label) : null;
+    if (!gen) return true;
+    const v = C().vitalFromText(D().precedingText(el));
+    return !v || v.label === gen.spec.label;
+  }
+  /**
+   * The template for a page, among the site's templates.
+   * page: { path (normalised), query (queryKey) }. Templates with only a few taught fields (older ones) match by address only.
+   * Returns { tpl, decision: 'use' | 'ask' | 'none', how: 'address' | 'layout', found, total, candidates: [{ id, title, found, total, score }] }
+   */
+  function match(doc, templates, page, ctx = {}) {
+    return T().session(doc, () => {
+      const full = templates.filter((t) => t.complete && !t._draft);
+      const scored = [];
+      for (const t of full) {
+        const addr = addressScore(t, page);
+        // a cheap first look (selectors only) before the full check, unless the address already fits
+        if (!addr && layoutScore(doc, t, ctx, true).score < 0.3) continue;
+        const ls = layoutScore(doc, t, ctx, false);
+        scored.push({ t, addr, ...ls, final: Math.min(1, ls.score + 0.1 * addr) });
+      }
+      scored.sort((a, b) => b.final - a.final || b.addr - a.addr);
+      const candidates = scored.map((x) => ({ id: x.t.id, title: x.t.title || x.t.framePath, found: x.found, total: x.total, score: Math.round(x.score * 100) / 100, address: x.addr > 0 }));
+      const best = scored[0];
+      if (best) {
+        const enough = best.total >= 3 || best.t.tables.length > 0 || best.addr > 0; // a table's headers are evidence enough
+        const how = best.addr >= 0.9 ? 'address' : 'layout';
+        if (enough && (best.score >= USE || (best.addr >= 0.9 && best.score >= 0.5))) return { tpl: best.t, decision: 'use', how, found: best.found, total: best.total, candidates };
+        if (enough && best.score >= ASK) return { tpl: best.t, decision: 'ask', how, found: best.found, total: best.total, candidates };
+      }
+      // an older template (taught fields only) of this address: completed from the rules
+      const partial = templates.find((t) => !t.complete && !t._draft && addressScore(t, page) > 0);
+      return { tpl: partial || null, decision: partial ? 'partial' : 'none', candidates };
+    });
+  }
+  /** Remember that this address shows this template (when it was matched by layout or chosen). */
+  function rememberAddress(t, page) {
+    if (addressScore(t, page) >= 0.99) return false;
+    t.addresses = [...(t.addresses || []).filter((a) => !(a.path === page.path && a.query === page.query)), { path: page.path, query: page.query }].slice(-20);
+    return true;
   }
 
   // ── editing ──────────────────────────────────────────────────────────
@@ -608,6 +682,6 @@
     return out + t.slice(pos);
   }
 
-  PDB.pagetpl = { IGNORE, newId, draft, extract, uncovered, snapshot, maskText, cleanCss, unitOf, timeText, timeColumns, fieldName, defaultTime,
+  PDB.pagetpl = { IGNORE, newId, draft, extract, uncovered, match, addressScore, rememberAddress, snapshot, maskText, cleanCss, unitOf, timeText, timeColumns, fieldName, defaultTime,
     setLabel, removeUnit, restoreUnit, deleteUnit, timeUsers, setTime, addField, sameLabel, addTable, fieldFor, locateUnit, findTable, isPersistent, readField };
 })(globalThis);

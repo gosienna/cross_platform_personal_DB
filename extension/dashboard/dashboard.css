@@ -74,3 +74,6 @@ main:has(#v-mappings.on) { max-width: none; }
 .listbtn.on { background: var(--pri); border-color: var(--pri); color: #fff; }
 
 .tpl-fields td.acts { white-space: nowrap; }
+.smp-box .tag .x { border: 0; background: rgba(255,255,255,.25); color: #fff; font: 700 11px/1 system-ui, sans-serif; padding: 1px 4px; margin-left: 6px; border-radius: 3px; cursor: pointer; }
+.smp-box .tag .x:hover { background: #d33; }
+.smp-box .tag { pointer-events: auto; }

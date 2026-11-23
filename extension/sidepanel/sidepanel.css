@@ -44,3 +44,5 @@ td.t { white-space: nowrap; }
 td.b { white-space: nowrap; }
 .rec button.rm { color: var(--mut); padding: 0 4px; margin-left: 2px; }
 .rec button.rm:hover { color: var(--bad); }
+.pagebar .ask { color: #8a6100; }
+.pagebar select.small { font-size: 11px; padding: 0 4px; max-width: 220px; }

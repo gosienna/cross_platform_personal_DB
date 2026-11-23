@@ -33,6 +33,7 @@
       .mapped .t{background:#1a9e5a}.unmapped .t{background:#c48a00}.chart .t{background:#2f6fd6}.warn .t{background:#d33}.off .t{background:#888}
       .fill .t{background:#7b4fd6}.keep .t{background:#888}.filled .t{background:#1a9e5a}
       .pick{border-color:#ff3d7f;border-width:2px;background:rgba(255,61,127,.08)}
+      .t .x{display:inline-block;margin-left:6px;padding:0 4px;border-radius:3px;background:rgba(255,255,255,.25);cursor:pointer} .t .x:hover{background:#d33}
       .time{border-color:#2f6fd6;border-style:dashed;border-width:2px;background:rgba(47,111,214,.08)} .time .t{background:#2f6fd6}
       .tip{position:fixed;right:12px;bottom:12px;font:13px system-ui;background:#222;color:#fff;padding:8px 12px;border-radius:6px;pointer-events:none}
     </style><div class="layer"></div>`;
@@ -58,6 +59,14 @@
         const t = document.createElement('div');
         t.className = 't'; t.textContent = m.text; t.title = m.title || m.text;
         t.addEventListener('click', (e) => { e.stopPropagation(); chrome.runtime.sendMessage({ type: 'pdb:badge', ref: m.ref, key: m.key }); });
+        if (m.x) {
+          // ✕ cancels this mapping in the page's template; ↺ brings a cancelled one back
+          const x = document.createElement('span');
+          x.className = 'x'; x.textContent = m.x === 'restore' ? '↺' : '✕';
+          x.title = m.x === 'restore' ? 'Read this again' : 'Cancel this mapping (not saved any more)';
+          x.addEventListener('click', (e) => { e.stopPropagation(); chrome.runtime.sendMessage({ type: 'pdb:markx', key: m.key, x: m.x }); });
+          t.appendChild(x);
+        }
         b.appendChild(t);
       }
       layer.appendChild(b);
@@ -91,24 +100,41 @@
     clearOverlay();
     const T = PDB.templates, PT = PDB.pagetpl;
     const framePath = T.pagePath(location.pathname);
-    const base = { url: location.href, title: document.title, top: window === window.top, framePath, found: [] };
-    const tpl = (ctx.pageTemplates || []).find((t) => t.framePath === framePath && (!ctx.origin || t.origin === ctx.origin));
+    const query = PDB.core.queryKey(location.search);
+    const page = { path: framePath, query };
+    const base = { url: location.href, title: document.title, top: window === window.top, framePath, query, found: [] };
+    const all = (ctx.pageTemplates || []).filter((t) => !ctx.origin || t.origin === ctx.origin);
+    // which template: one chosen in the side panel (or "a new page"), the draft being edited, or the best match
+    const choice = (ctx.choice || {})[framePath];
+    const editing = all.find((t) => t._draft && t.framePath === framePath && (!t.query || t.query === query));
+    let tpl = null, m = null;
+    if (choice === 'new') tpl = editing || null;
+    else if (choice) tpl = all.find((t) => t.id === choice) || null;
+    else if (editing) tpl = editing;
+    else { m = PT.match(document, all, page, ctx); tpl = m.decision === 'use' ? m.tpl : null; }
+    const match = m ? { decision: m.decision, how: m.how || null, found: m.found || 0, total: m.total || 0, id: m.tpl ? m.tpl.id : null,
+      title: m.tpl ? m.tpl.title || m.tpl.framePath : '', candidates: m.candidates } : { decision: choice === 'new' ? 'new' : choice ? 'chosen' : 'editing' };
     if (tpl && (tpl.complete || tpl._draft)) {
       reg = PDB.dom.makeRegistry();
       const res = PT.extract(document, tpl, { ...ctx, registry: reg });
       const unc = tpl._draft ? [] : PT.uncovered(document, tpl, res, { ...ctx, templates: [] });
-      return { ...base, mode: tpl._draft ? 'draft' : 'strict', partial: !!tpl._partial, template: tpl, changed: res.changed,
-        records: serialise(res.records), regions: res.regions, broken: res.broken, uncovered: unc };
+      // fields cancelled in the template, where they are on the page (shown greyed, to bring back)
+      const ignored = tpl.fields.filter((f) => f.label === PT.IGNORE && res.located.has(f.id))
+        .map((f) => ({ fid: f.id, ref: reg.id(res.located.get(f.id).box), label: f.prevLabel || PT.fieldName(f) }));
+      return { ...base, mode: tpl._draft ? 'draft' : 'strict', partial: !!tpl._partial, template: tpl, changed: res.changed, match,
+        records: serialise(res.records), regions: res.regions, broken: res.broken, uncovered: unc, ignored };
     }
+    // a new page: the built-in rules make a draft (with an older template's taught fields, if this address had one)
+    const partial = m && m.decision === 'partial' ? m.tpl : null;
     reg = PDB.dom.makeRegistry();
-    const legacy = tpl ? [{ direction: 'extract', framePath, fields: tpl.fields.filter((f) => f.label !== PT.IGNORE) }] : [];
+    const legacy = partial ? [{ direction: 'extract', framePath, fields: partial.fields.filter((f) => f.label !== PT.IGNORE) }] : [];
     const rules = PDB.dom.extractFromRoot(document, { ...ctx, registry: reg, templates: legacy.concat(ctx.templates || []) });
-    const d = PT.draft(document, rules, { origin: ctx.origin, framePath, title: document.title, base: tpl });
+    const d = PT.draft(document, rules, { origin: ctx.origin, framePath, query, title: document.title, base: partial });
     d._draft = true;
-    if (tpl) d._partial = true;
+    if (partial) d._partial = true;
     reg = PDB.dom.makeRegistry();
     const res = PT.extract(document, d, { ...ctx, registry: reg });
-    return { ...base, mode: 'draft', partial: !!tpl, template: d, records: serialise(res.records), regions: res.regions, broken: [], uncovered: [] };
+    return { ...base, mode: 'draft', partial: !!partial, template: d, match, records: serialise(res.records), regions: res.regions, broken: [], uncovered: [] };
   }
   /** The masked sample page of this frame for a template. */
   function sample(tpl, ctx) {

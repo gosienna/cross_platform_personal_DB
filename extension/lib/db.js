@@ -1,14 +1,16 @@
 /*
  * Local storage.
  *   IndexedDB "pdb":
- *     rows   – the unified data: { k, patientId, label, value, time, source }   (k = internal unique key)
+ *     rows   – the unified data: { k, patientId, label, value, time, source, page?, history? }
+ *              k = internal unique key (core.rowKey: page is part of it except for common labels)
+ *              page = page path the value was read from; history = [{ value, page, replacedAt }] values it replaced
  *     blobs  – media bytes: { id: "sha256:…", blob, mime, size, name, createdAt }
  *     samples – masked sample page of a page template: { id (= template id), html, capturedAt }
  *   chrome.storage.local:
  *     vocab         – { aliases: { normLabel: { label, sites?, source, createdAt } } }
  *     pageTemplates – one template per page (see lib/pagetpl.js); used by Capture, and by Fill (found by context)
  *     templates     – fields taught in Fill: [{ id, origin, path, framePath, direction: 'fill', fields }]
- *     settings   – backup / AI / privacy settings
+ *     settings   – backup / AI / privacy settings, commonLabels (null = defaults)
  *     meta       – { dataVersion, lastChange }  (backup uses it to know whether data changed)
  */
 (function (g) {
@@ -17,8 +19,10 @@
   const DB_NAME = 'pdb';
   let _db = null;
 
-  function open() {
-    if (_db) return Promise.resolve(_db);
+  async function open() {
+    if (_db) return _db;
+    // row keys depend on which labels are common: load the user's list before any key is made
+    C().setCommonLabels((await get('settings', {})).commonLabels ?? null);
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, 2);
       req.onupgradeneeded = () => {
@@ -38,16 +42,82 @@
   }
   const done = (tx) => new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error); });
   const req = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-  const clean5 = (r) => ({ patientId: String(r.patientId), label: String(r.label), value: String(r.value ?? ''), time: String(r.time ?? 'nan'), source: String(r.source ?? '') });
+  /** The 5 fields, plus page and history when present. */
+  function cleanRow(r) {
+    const c = { patientId: String(r.patientId), label: String(r.label), value: String(r.value ?? ''), time: String(r.time ?? 'nan'), source: String(r.source ?? '') };
+    if (r.page) c.page = String(r.page);
+    if (Array.isArray(r.history) && r.history.length) c.history = r.history;
+    if (r.edited) c.edited = String(r.edited);
+    return c;
+  }
+  /** Put one row; a stored value it replaces goes to history. */
+  function putMerged(st, c) {
+    const k = C().rowKey(c);
+    const got = st.get(k);
+    got.onsuccess = () => {
+      const old = got.result;
+      const row = { k, ...c };
+      if (old) {
+        if (!row.page && old.page) row.page = old.page;
+        const h = C().withHistory(old, c);
+        if (h.length) row.history = h; else delete row.history;
+      }
+      st.put(row);
+    };
+  }
 
   async function putRows(rows) {
     const db = await open();
     const tx = db.transaction('rows', 'readwrite');
     const st = tx.objectStore('rows');
-    for (const r of rows) { const c = clean5(r); st.put({ k: C().rowKey(c), ...c }); }
+    for (const r of rows) putMerged(st, cleanRow(r));
     await done(tx);
     await touch();
     return rows.length;
+  }
+  /** Change a stored value by hand: the old value goes to history and the row is marked edited (key unchanged). */
+  async function editValue(row, value) {
+    const db = await open();
+    const tx = db.transaction('rows', 'readwrite');
+    const st = tx.objectStore('rows');
+    const k = C().rowKey(row);
+    const got = await req(st.get(k));
+    if (!got) throw new Error('That value is no longer stored.');
+    if (got.value !== String(value)) {
+      const stamp = C().utcStamp(new Date());
+      st.put({ ...got, value: String(value), history: C().withHistory(got, { value: String(value) }, stamp), edited: stamp });
+    }
+    await done(tx);
+    await touch();
+  }
+  /**
+   * Save which labels are common (null = defaults) and re-key every row. Rows that now share a key (a label became
+   * common) are merged into one: one value is kept, the others go to its history. Returns { rows, merged }.
+   */
+  async function setCommonLabels(list) {
+    await saveSettings({ commonLabels: Array.isArray(list) ? list : null });
+    const db = await open();
+    C().setCommonLabels(Array.isArray(list) ? list : null);
+    const tx = db.transaction('rows', 'readwrite');
+    const st = tx.objectStore('rows');
+    const all = await req(st.getAll());
+    const by = new Map();
+    for (const r of all) {
+      const { k, ...c } = r;
+      const nk = C().rowKey(c);
+      const prev = by.get(nk);
+      if (!prev) { by.set(nk, { k: nk, ...c }); continue; }
+      const row = { k: nk, ...c, page: c.page || prev.page };
+      const h = C().withHistory(prev, c);
+      if (h.length) row.history = h;
+      if (!row.page) delete row.page;
+      by.set(nk, row);
+    }
+    st.clear();
+    for (const r of by.values()) st.put(r);
+    await done(tx);
+    await touch();
+    return { rows: by.size, merged: all.length - by.size };
   }
   async function deleteRows(rows) {
     const db = await open();
@@ -71,7 +141,7 @@
     for (const l of labels) out.push(...(await req(ix.getAll(l))));
     return out.map(({ k, ...r }) => r);
   }
-  /** Map rowKey → stored row for the keys of the given rows. */
+  /** Map rowKey → stored row for the keys of the given rows (each stored row includes its page and history). */
   async function existingFor(rows) {
     const db = await open();
     const st = db.transaction('rows').objectStore('rows');
@@ -79,7 +149,13 @@
     for (const r of rows) {
       const k = C().rowKey(r);
       const got = await req(st.get(k));
-      if (got) m.set(k, got);
+      if (got) { m.set(k, got); continue; }
+      // a row without a page (from a CSV or FHIR file) that some page already gave with the same value: already saved
+      if (!r.page && !C().isCommon(r.label)) {
+        const same = (await req(st.index('patientLabel').getAll([String(r.patientId), String(r.label)])))
+          .find((x) => x.time === String(r.time) && x.source === String(r.source) && x.value === String(r.value));
+        if (same) m.set(C().sameValueKey(r), same);
+      }
     }
     return m;
   }
@@ -191,7 +267,8 @@
   const savePageTemplates = async (list) => { await set('pageTemplates', list); await touch(); };
   async function savePageTemplate(t) {
     const all = await getPageTemplates();
-    const i = all.findIndex((x) => x.id === t.id || (x.origin === t.origin && x.framePath === t.framePath));
+    // by id: several templates can share one address (pages told apart by their layout or query)
+    const i = all.findIndex((x) => x.id === t.id);
     if (i >= 0) all[i] = t; else all.push(t);
     await savePageTemplates(all);
   }
@@ -210,6 +287,12 @@
   }
   async function getSample(id) { const db = await open(); return req(db.transaction('samples').objectStore('samples').get(id)); }
   async function allSamples() { const db = await open(); return req(db.transaction('samples').objectStore('samples').getAll()); }
+  // another page (the dashboard) changed which labels are common → use the same row keys here
+  if (g.chrome && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((ch, area) => {
+      if (area === 'local' && ch.settings) C().setCommonLabels((ch.settings.newValue || {}).commonLabels ?? null);
+    });
+  }
   const getSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await get('settings', {})) });
   const saveSettings = async (patch) => set('settings', { ...(await getSettings()), ...patch });
 
@@ -220,7 +303,7 @@
     fill: { overwrite: false },
   };
 
-  PDB.db = { open, putRows, deleteRows, allRows, rowsByPatient, rowsByLabels, existingFor, patients, mergePatients, clearAll,
+  PDB.db = { open, putRows, editValue, setCommonLabels, deleteRows, allRows, rowsByPatient, rowsByLabels, existingFor, patients, mergePatients, clearAll,
     sha256, putBlob, getBlob, allBlobMeta, get, set, getVocab, learnAlias, getTemplates, saveTemplates, getSettings, saveSettings, DEFAULT_SETTINGS,
     migrateTemplates, getPageTemplates, savePageTemplates, savePageTemplate, deletePageTemplate, putSample, getSample, allSamples };
 })(globalThis);

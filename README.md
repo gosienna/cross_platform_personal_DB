@@ -48,10 +48,26 @@ Every value is one row:
 **source**
 - The site's origin, or `file:<name>` for imports.
 
+**Page and history (stored locally, not in the 5 fields)**
+- Each saved value also records the **page** it was read on: the path only, e.g. `/MEDICINE.ASP`. Path parts with 4 or more digits become `*`, and the query string is dropped, so record numbers in URLs are not stored.
+- When a stored value is replaced (a new capture you ticked, an import with "replace", or an edit), the old value and its page go to the row's **history** (up to 20 entries).
+- The dashboard shows the page of every value, and a `differs by page` badge whose tooltip lists the earlier values.
+
 **Uniqueness**
-- One row per (patientId, label, time, source). `Medication` is the exception: its value is part of the key, so two drugs started at the same time are both kept.
-- A re-capture of the same row is a duplicate and is skipped.
-- A different value for the same key is shown as `old → new` and replaces the stored value only if you tick it.
+- Values read on **different pages are different data points**: one row per (patientId, label, time, source, page). The same reading shown on two pages is stored twice.
+- **Common fields** are the exception. They should be the same on every page of a system, so they keep one row per (patientId, label, time, source).
+  - The default common fields are the persistent labels: Name, National ID, MRN, Sex, Birth date, phone, address, …
+  - Change the list in **Settings → Common fields**. Saving re-keys the stored rows. Values that now share a key are combined into one, and the others go to its history.
+  - A common field can be edited on the patient card (✎). The old value goes to the history.
+- `Medication` keeps its value in the key, so two drugs started at the same time are both kept.
+- Re-capturing the same row on the same page is a duplicate and is skipped.
+- A different value for the same key is shown as `old → new`, and the tooltip names the page of the stored value. It replaces the stored value only if you tick it. The old value is kept in the history.
+- Rows saved before pages were recorded have no page. A new capture of the same value from a page is stored as a separate row.
+
+**What exports keep**
+- CSV and FHIR carry the 5 fields only.
+- Personal DB JSON and the encrypted Drive backup also keep `page` and `history`.
+- Re-importing a CSV cannot tell pages apart. Rows that differ only by page come back as one row, and the rest are shown as "different from stored".
 
 ## Install (unpacked)
 
@@ -67,6 +83,13 @@ The extension ID is fixed by the `key` in the manifest: `obkilllebkjkeglikimoaig
 
 ### Page templates
 Each page (a site's frame page; record numbers in the address don't matter) has **one template** that maps every value on it. The assumption is that a page's layout doesn't change.
+
+**Which template a page uses** is decided by its **layout first, its address second**:
+- Every saved template of the site is tried on the page. Its score is the share of its fields and tables found by their position and the text before them (label text alone is not enough).
+- The address helps: the same page path, with record IDs (numbers, UUIDs …) as `*`, and the same values for the query keys that pick a page (`?func=profile`). Pages on one path with different layouts get separate templates.
+- 70% or more found: the page uses that template. The banner says how it matched, e.g. *matched by layout: 18 of 20 fields found*. 40–70%: the banner asks *"This may be the template … Use it / No, it's a new page"*. Less: it's a new page.
+- **Use another template ▾** and **This is a new page** correct a match. When you Save, the address is remembered for the template you used.
+- A list whose value column takes its meaning from the page heading (體溫 / 血糖) only matches a page with the same heading.
 
 1. **First visit:** the built-in rules read the page and make a **draft template**. A yellow banner says so. When you press **Save**, the draft is saved as the page's template. Rows you unticked are left out of it.
 2. **After that:** the page is read **strictly by its template**. Only template fields are saved, under the labels the template gives them.

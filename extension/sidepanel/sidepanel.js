@@ -44,12 +44,18 @@
   async function extractCtx() {
     const vocab = await DB.getVocab();
     const pageTemplates = (await DB.getPageTemplates()).filter((t) => t.origin === st.source);
+    const choice = {};
     for (const pg of st.pages.values()) {
-      const i = pageTemplates.findIndex((t) => t.framePath === pg.fp);
+      if (pg.choice) choice[pg.fp] = pg.choice;
+      if (!pg.tpl) continue;
+      const i = pageTemplates.findIndex((t) => t.id === pg.tpl.id);
       if (i >= 0) pageTemplates[i] = pg.tpl; else pageTemplates.push(pg.tpl);
+      // once a page has its template, it keeps it while you work on it (edits must not change which template it is)
+      if (!pg.choice && !pg.tpl._draft) choice[pg.fp] = pg.tpl.id;
     }
+    st.siteTemplates = pageTemplates.filter((t) => t.complete && !t._draft);
     const templates = (await DB.getTemplates()).filter((t) => t.origin === st.source && t.direction === 'fill');
-    return { vocab, origin: st.source, pageTemplates, templates };
+    return { vocab, origin: st.source, pageTemplates, templates, choice };
   }
   /**
    * Templates for a Fill scan: fields taught in Fill on this page, plus the fields of this site's page templates
@@ -121,6 +127,7 @@
     else if (msg.type === 'pdb:taught' && msg.mode === 'time') run(() => onTimePicked(msg.field));
     else if (msg.type === 'pdb:media') run(() => addMedia(msg.media));
     else if (msg.type === 'pdb:badge') focusRow(`${sender.frameId}:${msg.ref}`);
+    else if (msg.type === 'pdb:markx') run(() => onMarkX(msg.key, msg.x));
     else if (msg.type === 'pdb:pickCancelled') { call(st.tab.id, 'stopPick').catch(() => {}); status('Cancelled.'); }
     else if (msg.type === 'pdb:error') status(msg.message, true);
   });
@@ -135,16 +142,21 @@
     const fref = (frameId, x) => (x != null ? `${frameId}:${x}` : null);
     for (const { frameId, result } of results) {
       const fp = result.framePath;
+      // the page each value is read from: values from different pages are different data points
+      let page = fp;
+      if (page == null) { try { page = C.pagePath(new URL(result.url).pathname); } catch (e) { page = C.pagePath(st.path); } }
       if (result.template) {
         const pg = st.pages.get(fp) || { fp, dirty: false };
-        Object.assign(pg, { tpl: result.template, mode: result.mode, partial: !!result.partial, frameId, title: result.title,
-          uncovered: (result.uncovered || []).map((u) => ({ ...u, ref: fref(frameId, u.ref) })) });
+        Object.assign(pg, { tpl: result.template, mode: result.mode, partial: !!result.partial, frameId, title: result.title, query: result.query || '',
+          match: result.match && result.match.decision !== 'chosen' && result.match.decision !== 'editing' ? result.match : pg.match || result.match,
+          uncovered: (result.uncovered || []).map((u) => ({ ...u, ref: fref(frameId, u.ref) })),
+          ignored: (result.ignored || []).map((x) => ({ ...x, ref: fref(frameId, x.ref) })) });
         if (result.changed) pg.dirty = true;
         st.pages.set(fp, pg);
       }
       for (const r of result.records) {
-        for (const it of r.items) { it.ref = fref(frameId, it.ref); it.region = fref(frameId, it.region); it.timeRef = fref(frameId, it.timeRef); it.fp = result.template ? fp : null; }
-        for (const m of r.meds) { m.ref = fref(frameId, m.ref); m.region = fref(frameId, m.region); m.fp = result.template ? fp : null; }
+        for (const it of r.items) { it.ref = fref(frameId, it.ref); it.region = fref(frameId, it.region); it.timeRef = fref(frameId, it.timeRef); it.fp = result.template ? fp : null; it.page = page; }
+        for (const m of r.meds) { m.ref = fref(frameId, m.ref); m.region = fref(frameId, m.region); m.fp = result.template ? fp : null; m.page = page; }
         all.push(r);
       }
       for (const g of result.regions || []) if (g.ref != null) st.regions.push({ ...g, ref: `${frameId}:${g.ref}` });
@@ -159,7 +171,7 @@
     st.recs = merged.map((rec, i) => {
       const id = C.resolveIdentity(rec.hints, st.source, ix);
       const rows = C.recordToRows(rec, { source: st.source, captureTime: st.captureTime }).map((r, j) => ({
-        key: `${i}.${j}`, label: r.label, value: r.value, time: r.time, source: r.source,
+        key: `${i}.${j}`, label: r.label, value: r.value, time: r.time, source: r.source, page: r.page || '',
         rawLabel: r._item.rawLabel || r.label, ref: r._item.ref || null, regionRef: r._item.region || null, warn: r._item.warn, unmapped: !!r._item.unmapped,
         how: r._item.how || (opts.ai ? 'ai' : null), conflictWith: r._conflictWith, on: true,
         fid: r._item.fid || null, fids: (r._fids || [r._item.fid]).filter(Boolean), fp: r._item.fp || null, timeRef: r._item.timeRef || null,
@@ -183,7 +195,7 @@
     const diff = C.diffRows(rows, existing);
     rec.rows.forEach((r, i) => {
       const before = r.status;
-      r.status = diff[i].status; r.oldValue = diff[i].oldValue;
+      r.status = diff[i].status; r.oldValue = diff[i].oldValue; r.oldPage = diff[i].oldPage;
       if (before == null || before !== r.status) r.on = r.status === 'new' && !r.conflictWith;
     });
   }
@@ -205,7 +217,7 @@
       rec = st.recs[+$('#dlgForm').dataset.sel];
     }
     if (!rec) { rec = { hints: {}, skipped: [], rows: [], pid: '', identity: { reason: 'unknown', suggestions: [] }, mediaOnly: true }; st.recs.push(rec); }
-    rec.rows.push({ key: `m.${rec.rows.length}`, label: MEDIA_LABEL[media.kind] || 'Attachment', value: id, time: st.captureTime, source: st.source, rawLabel: media.name, on: true, status: 'new', media: true });
+    rec.rows.push({ key: `m.${rec.rows.length}`, label: MEDIA_LABEL[media.kind] || 'Attachment', value: id, time: st.captureTime, source: st.source, page: C.pagePath(st.path), rawLabel: media.name, on: true, status: 'new', media: true });
     status(`${MEDIA_LABEL[media.kind] || 'File'} added (${(blob.size / 1024).toFixed(0)} KB). Choose the patient and Save.`);
     render();
   }
@@ -309,6 +321,22 @@
     await rescan(`Taught: ${field.anchor || 'this field'} → ${label}. It is part of this page's template now (kept when you Save).`);
   }
 
+  /** ✕ / ↺ on an outline on the page: cancel a mapping, or bring a cancelled one back. */
+  async function onMarkX(key, x) {
+    if (x === 'restore') {
+      const [, fp, fid] = String(key).split('␟');
+      const pg = st.pages.get(fp);
+      if (!pg || !PT.restoreUnit(pg.tpl, fid)) return;
+      pg.dirty = true;
+      return rescan('Read again. Press Save or Save template to keep this.');
+    }
+    const r = st.recs.flatMap((rec) => rec.rows).find((row) => row.key === key);
+    const pg = r && pageOf(r);
+    if (!pg || !r.fids || !r.fids.length) return;
+    for (const fid of r.fids) PT.removeUnit(pg.tpl, fid);
+    pg.dirty = true;
+    await rescan(`Cancelled “${r.label}”: not saved any more (↺ on the page brings it back). Press Save or Save template to keep this.`);
+  }
   /** ✕ on a row read by the page's template: leave that field out of the template (all fields the row stands for). */
   function removeBtn(r) {
     const pg = pageOf(r);
@@ -404,7 +432,44 @@
       ? h('div', { class: 'unc' }, `${pg.uncovered.length} value${pg.uncovered.length > 1 ? 's' : ''} on this page ${pg.uncovered.length > 1 ? 'aren’t' : 'isn’t'} in the template. `,
         h('button', { class: 'link', onclick: () => run(() => reviewUncovered(pg)) }, 'Review'))
       : null;
-    return h('div', { class: 'pagebar' + (pg.mode === 'draft' ? ' draft' : '') }, h('div', {}, h('b', {}, pg.mode === 'draft' ? 'Draft template' : 'Template'), where, ' · ', text, ' ', saveT), unc);
+    return h('div', { class: 'pagebar' + (pg.mode === 'draft' ? ' draft' : '') }, h('div', {}, h('b', {}, pg.mode === 'draft' ? 'Draft template' : 'Template'), where, ' · ', text, ' ', saveT), matchRow(pg), unc);
+  }
+  /** How this page was matched to a template, and the choice to use another one or treat it as a new page. */
+  function matchRow(pg) {
+    const m = pg.match || {};
+    const others = (st.siteTemplates || []).filter((t) => !pg.tpl || t.id !== pg.tpl.id);
+    const name = (t) => `“${t.title || t.framePath}”`;
+    const pick = () => {
+      if (!others.length) return null;
+      const score = new Map((m.candidates || []).map((c) => [c.id, c]));
+      const sorted = [...others].sort((a, b) => ((score.get(b.id) || {}).score || 0) - ((score.get(a.id) || {}).score || 0));
+      const sel = h('select', { class: 'small', onchange: () => { if (sel.value) run(() => chooseTemplate(pg, sel.value)); } },
+        h('option', { value: '' }, pg.mode === 'draft' ? 'Use a saved template ▾' : 'Use another template ▾'),
+        sorted.map((t) => { const c = score.get(t.id); return h('option', { value: t.id }, `${t.title || t.framePath} · ${t.framePath}${c ? ` (${c.found}/${c.total} found)` : ''}`); }));
+      return sel;
+    };
+    const newBtn = pg.mode === 'strict' ? h('button', { class: 'link', title: 'This page is not that template: start a draft for it from the built-in rules', onclick: () => run(() => newPage(pg)) }, 'This is a new page') : null;
+    let how = null;
+    if (pg.mode === 'strict' && pg.choice) how = 'chosen by you';
+    else if (pg.mode === 'strict' && m.decision === 'use') how = m.how === 'address' ? `matched by address (${m.found} of ${m.total} fields found)` : `matched by layout: ${m.found} of ${m.total} fields found`;
+    if (pg.mode === 'draft' && m.decision === 'ask' && m.id) {
+      const t = (st.siteTemplates || []).find((x) => x.id === m.id);
+      if (t) return h('div', { class: 'ask' }, `This may be the template ${name(t)}: ${m.found} of ${m.total} fields found. `,
+        h('button', { class: 'link', onclick: () => run(() => chooseTemplate(pg, t.id)) }, 'Use it'), ' · ',
+        h('button', { class: 'link', onclick: () => { m.decision = 'none'; render(); } }, 'No, it’s a new page'), ' ', pick());
+    }
+    if (!how && !others.length) return null;
+    return h('div', { class: 'small mut' }, how ? `${how} · ` : '', pick(), ' ', newBtn);
+  }
+  /** Read this page with another (saved) template; this address is remembered for it when you Save. */
+  async function chooseTemplate(pg, id) {
+    pg.choice = id; pg.remember = true; pg.dirty = false; pg.tpl = null;
+    await rescan('Read with the template you chose. Save to remember it for this address.');
+  }
+  /** Not the matched template: a draft from the built-in rules instead (saved as a new template). */
+  async function newPage(pg) {
+    pg.choice = 'new'; pg.remember = false; pg.dirty = false; pg.tpl = null; pg.match = null;
+    await rescan('New page: a draft template from the built-in rules. It is saved as a new template when you press Save.');
   }
   async function reviewUncovered(pg) {
     const items = pg.uncovered.map((u) => {
@@ -486,7 +551,11 @@
             return false;
           });
         }
-      } else if (!pg.dirty && (await DB.getSample(tpl.id))) continue;
+      } else {
+        // matched by layout or chosen: remember this address for the template
+        const remembered = (pg.remember || (pg.match && pg.match.how === 'layout')) && PT.rememberAddress(tpl, { path: pg.fp, query: pg.query || '' });
+        if (!pg.dirty && !remembered && (await DB.getSample(tpl.id))) continue;
+      }
       const t = { ...tpl, complete: true, updatedAt: Date.now() };
       delete t._draft; delete t._partial;
       await DB.savePageTemplate(t);
@@ -521,7 +590,10 @@
   const statusBadge = (r) => {
     if (r.conflictWith) return h('span', { class: 'badge warn', title: `This page shows two values for ${r.label}; the other is “${r.conflictWith}”.` }, 'two values');
     if (r.status === 'duplicate') return h('span', { class: 'badge dup' }, 'already saved');
-    if (r.status === 'changed') return h('span', { class: 'badge chg', title: 'Stored value: ' + r.oldValue }, `${r.oldValue} → new`);
+    if (r.status === 'changed') {
+      const where = r.oldPage && r.oldPage !== r.page ? ` (read on ${r.oldPage})` : '';
+      return h('span', { class: 'badge chg', title: `Stored value: ${r.oldValue}${where}. Saving keeps it in the history.` }, `${r.oldValue} → new`);
+    }
     if (r.warn) return h('span', { class: 'badge warn', title: r.warn }, r.warn.replace(/_/g, ' '));
     if (r.unmapped) return h('span', { class: 'badge map' }, 'unmapped');
     if (r.how === 'ai') return h('span', { class: 'badge vio' }, 'AI');
@@ -662,10 +734,14 @@
     for (const rec of st.recs) for (const r of rec.rows) {
       if (!r.ref || !rowHit(r)) continue;
       const kind = !r.on ? 'off' : r.warn ? 'warn' : r.unmapped ? 'unmapped' : 'mapped';
-      add(r.ref, { kind, text: r.unmapped ? `? ${C.cleanLabel(r.rawLabel)}` : `${r.label} ✓`, key: r.key, title: `${r.label}: ${r.value}` });
+      const pg = pageOf(r);
+      const inTpl = !!(pg && r.fids && r.fids.some((fid) => PT.unitOf(pg.tpl, fid)));
+      add(r.ref, { kind, text: r.unmapped ? `? ${C.cleanLabel(r.rawLabel)}` : `${r.label} ✓`, key: r.key, title: `${r.label}: ${r.value}`, x: inTpl ? 'cancel' : null });
       // hovering a ⏱ chip: where this value's time is read from
       if (st.hot === r.key && r.timeRef) add(r.timeRef, { kind: 'time', text: `⏱ time of ${r.label}`, key: r.key });
     }
+    // fields cancelled in the template: greyed, with ↺ to bring them back
+    if (!ui.q.cap) for (const pg of st.pages.values()) for (const x of pg.ignored || []) if (x.ref) add(x.ref, { kind: 'off', text: `${x.label} (not saved)`, key: `ign␟${pg.fp}␟${x.fid}`, x: 'restore' });
     // values the rules see that the template does not cover
     if (!ui.q.cap) for (const pg of st.pages.values()) for (const u of pg.uncovered || []) if (u.ref) add(u.ref, { kind: 'unmapped', text: `+ not in template: ${u.unit.label || ''}`, key: 'unc' });
     chrome.scripting.executeScript({ target: { tabId: st.tab.id, allFrames: true }, func: () => window.__pdbAgent && window.__pdbAgent.clearOverlay() }).then(() => {
@@ -693,7 +769,7 @@
       if (!chosen.length) continue;
       const pid = rec.pid.trim();
       if (!pid) throw new Error(`Enter a patient ID for “${rec.hints.name || 'unnamed record'}” (or untick its rows).`);
-      for (const r of chosen) out.push({ patientId: pid, label: r.label, value: r.value, time: r.time, source: r.source });
+      for (const r of chosen) out.push({ patientId: pid, label: r.label, value: r.value, time: r.time, source: r.source, page: r.page || '' });
     }
     // learned mappings (shared by extract and fill)
     const global = $('#rememberGlobal').checked;
