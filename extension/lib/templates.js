@@ -2,6 +2,7 @@
  * Finding a field again on a page (used by page templates, see pagetpl.js, and by fields taught in Fill).
  *   template = { id, origin, path, framePath?, direction: 'extract'|'fill', fields: [{ kind, selector, anchor, context, tag, label }] }
  *   field.kind = 'group' (a tick-box / radio group, found by its first option) | 'control' (a form box) | 'text' (a value on a page)
+ *     | 'image' (a picture: <img>, <canvas> or <svg>, whose content is read by Claude; never used by Fill)
  *   field.context = up to 3 nearest text pieces before the element (numbering and notes removed), field.tag = its tag;
  *     used to find the element again when the layout differs between records.
  *   Capture and Fill use each other's templates too: a field taught on a read-only page (Capture) is found on the edit
@@ -136,10 +137,16 @@
     const kind = kindOf(field, use);
     const notOverlay = (e) => !(e.closest && e.closest('#' + D().OVERLAY_ID));
     if (kind === 'group') return (e) => D().optionAt(e) === e && (use !== 'fill' || e.tagName === 'INPUT') && notOverlay(e);
+    if (kind === 'image') return (e) => use !== 'fill' && D().isPicture(e) && (!tag || e.tagName === tag) && notOverlay(e);
     if (use === 'fill') return (e) => TEXT_CTL(e) && (!tag || e.tagName === tag);
     if (cross) return (e) => notOverlay(e) && !/^(BR|HR|IMG|TABLE|TBODY|TR|SCRIPT|STYLE)$/.test(e.tagName) && (TEXT_CTL(e) || !!D().textOf(e));
     return (e) => (!tag || e.tagName === tag) && notOverlay(e);
   }
+  /*
+   * A picture has no text of its own to show it is the right one, so the text right before it (its caption or label)
+   * must be the same; otherwise a chart that moved into its place (e.g. temperature instead of glucose) would be read.
+   */
+  const nearestOk = (field, stored, cand) => field.kind !== 'image' || ctxMatch(stored[stored.length - 1], cand[cand.length - 1]);
   /** Find the element whose preceding text best matches the stored context. */
   function findByContext(doc, field, want) {
     const stored = (field.context || []).filter(Boolean);
@@ -147,6 +154,7 @@
     if (typeof want !== 'function') want = wantFor(field, want ? 'fill' : 'extract', false);
     let best = null, bestScore = 0;
     for (const c of contexts(doc, want)) {
+      if (!nearestOk(field, stored, c.ctx)) continue;
       const s = ctxScore(stored, c.ctx);
       if (s > bestScore) { best = c.el; bestScore = s; }
     }
@@ -157,7 +165,8 @@
   const contextOk = (el, field) => {
     const stored = (field.context || []).filter(Boolean);
     if (!stored.length) return true;
-    return ctxScore(stored, contextFor(el)) >= (stored.length >= 2 ? 2 : 1);
+    const cand = contextFor(el);
+    return nearestOk(field, stored, cand) && ctxScore(stored, cand) >= (stored.length >= 2 ? 2 : 1);
   };
   /** Find an element by anchor text: the element right after a short text equal to the anchor. */
   function findByAnchor(doc, anchor, wantControl) {
@@ -196,6 +205,7 @@
     if (!cross) {
       try { el = doc.querySelector(field.selector); } catch (e) { el = null; }
       if (el && !want(el) && kindOf(field, use) === 'group') el = D().optionAt(el);
+      if (el && !want(el) && kindOf(field, use) === 'image') el = null; // the selector now points at something that is not a picture
       if (el && field.context && field.context.length) {
         // selector still matches, but is it still in the same place (same text before it)?
         if (!contextOk(el, field)) el = null;
@@ -209,6 +219,7 @@
     if (!el) {
       el = findByAnchor(doc, field.anchor, wantControl);
       if (el && kindOf(field, use) === 'group') el = D().optionAt(el) || D().optionsIn(el)[0] || null;
+      else if (el && kindOf(field, use) === 'image' && !want(el)) el = Array.from(el.querySelectorAll('img,canvas,svg')).find(want) || null; // the picture next to the label
       else if (el && cross && !want(el)) el = null;
       how = el ? 'anchor' : 'missing';
     }

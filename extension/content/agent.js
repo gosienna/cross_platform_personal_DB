@@ -122,7 +122,7 @@
       const ignored = tpl.fields.filter((f) => f.label === PT.IGNORE && res.located.has(f.id))
         .map((f) => ({ fid: f.id, ref: reg.id(res.located.get(f.id).box), label: f.prevLabel || PT.fieldName(f) }));
       return { ...base, mode: tpl._draft ? 'draft' : 'strict', partial: !!tpl._partial, template: tpl, changed: res.changed, match,
-        records: serialise(res.records), regions: res.regions, broken: res.broken, uncovered: unc, ignored };
+        records: serialise(res.records), regions: res.regions, broken: res.broken, uncovered: unc, ignored, images: res.images || [] };
     }
     // a new page: the built-in rules make a draft (with an older template's taught fields, if this address had one)
     const partial = m && m.decision === 'partial' ? m.tpl : null;
@@ -134,7 +134,12 @@
     if (partial) d._partial = true;
     reg = PDB.dom.makeRegistry();
     const res = PT.extract(document, d, { ...ctx, registry: reg });
-    return { ...base, mode: 'draft', partial: !!partial, template: d, match, records: serialise(res.records), regions: res.regions, broken: [], uncovered: [] };
+    return { ...base, mode: 'draft', partial: !!partial, template: d, match, records: serialise(res.records), regions: res.regions, broken: [], uncovered: [], images: res.images || [] };
+  }
+  /** This frame's page compared with its template (see lib/tplcheck.js); null in other frames. */
+  function checkTemplate(tpl, ctx) {
+    if (!tpl || PDB.templates.pagePath(location.pathname) !== tpl.framePath) return null;
+    return PDB.tplcheck.check(document, tpl, ctx);
   }
   /** The masked sample page of this frame for a template. */
   function sample(tpl, ctx) {
@@ -156,7 +161,8 @@
   /**
    * What a Teach click points at — the same in Capture and Fill:
    *   a tick box, radio, tick-box picture or its label text → the whole group ({ el: first option, group });
-   *   a form box → the box; (Capture only) any other element → that element.
+   *   a form box → the box; (Capture only) a picture (img, canvas, svg) → the picture, read by Claude;
+   *   (Capture only) any other element → that element.
    */
   function teachTarget(el, mode, cache = new Map()) {
     const opt = PDB.dom.optionAt(el);
@@ -165,6 +171,8 @@
       const group = cache.get(opt);
       return { el: group.opts[0], group };
     }
+    const pic = mode === 'teach' && PDB.dom.pictureAt(el);
+    if (pic) return { el: pic };
     const ctl = el.closest('input,select,textarea');
     if (ctl && !/^(hidden|button|submit|reset|image|file|password)$/i.test(ctl.type || '')) return { el: ctl };
     return mode === 'teach' ? { el } : null;
@@ -176,7 +184,7 @@
     ensureOverlay();
     const tip = document.createElement('div');
     tip.className = 'tip';
-    tip.textContent = { extract: 'Click the part of the page to capture · Esc to cancel', teach: 'Click a value, a form field or a tick box to teach its label · Esc to cancel', media: 'Click an image, chart, audio or video · Esc to cancel', fill: 'Click a form field or a tick box to teach its label · Esc to cancel', time: 'Click the date or time this value belongs to · Esc to cancel' }[mode];
+    tip.textContent = { extract: 'Click the part of the page to capture · Esc to cancel', teach: 'Click a value, a form field, a tick box or a picture to teach its label · Esc to cancel', media: 'Click an image, chart, audio or video · Esc to cancel', fill: 'Click a form field or a tick box to teach its label · Esc to cancel', time: 'Click the date or time this value belongs to · Esc to cancel' }[mode];
     shadow.appendChild(tip);
     let hover = null;
     const box = document.createElement('div');
@@ -244,6 +252,59 @@
     const blob = await res.blob();
     const kind = tag === 'img' || tag === 'picture' ? 'image' : tag;
     return { kind, name: decodeURIComponent((new URL(src, location.href).pathname.split('/').pop() || kind)).slice(0, 80), dataURL: await blobToDataURL(blob), size: blob.size };
+  }
+
+  // ── image fields: the picture as it is shown now ────────────────────
+  /**
+   * The pixels of image-field pictures (refs from the last scan), for the side panel to read with Claude.
+   * Each → { ref, dataURL } | { ref, src } (another site's picture: the side panel fetches it) | { ref, shot: true }
+   * (cannot be read from the page: the side panel crops a screenshot) | { ref, error }.
+   */
+  async function imageData(refs) {
+    const out = [];
+    for (const ref of refs) {
+      const el = reg.els[ref];
+      if (!el || !el.isConnected) { out.push({ ref, error: 'The picture is no longer on the page. Scan again.' }); continue; }
+      try { out.push({ ref, ...(await pictureData(el)) }); } catch (e) { out.push({ ref, error: String((e && e.message) || e) }); }
+    }
+    return out;
+  }
+  async function pictureData(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'img') {
+      if (!el.complete) await new Promise((res) => { el.addEventListener('load', res, { once: true }); el.addEventListener('error', res, { once: true }); setTimeout(res, 5000); });
+      if (!el.naturalWidth) throw new Error('The picture did not load.');
+      try {
+        const c = document.createElement('canvas');
+        c.width = el.naturalWidth; c.height = el.naturalHeight;
+        c.getContext('2d').drawImage(el, 0, 0);
+        return { dataURL: c.toDataURL('image/png') };
+      } catch (e) { /* another site's picture (tainted canvas): fetch the file instead */ }
+      const src = el.currentSrc || el.src;
+      try { const r = await fetch(src, { credentials: 'include' }); if (r.ok) return { dataURL: await blobToDataURL(await r.blob()) }; } catch (e) { /* not allowed from the page */ }
+      return { src };
+    }
+    if (tag === 'canvas') {
+      try { return { dataURL: el.toDataURL('image/png') }; } catch (e) { return { shot: true }; }
+    }
+    // svg, with its drawn size (the side panel turns it into a PNG)
+    const r = el.getBoundingClientRect();
+    const clone = el.cloneNode(true);
+    if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    if (!clone.getAttribute('width')) clone.setAttribute('width', String(Math.round(r.width)));
+    if (!clone.getAttribute('height')) clone.setAttribute('height', String(Math.round(r.height)));
+    const xml = new XMLSerializer().serializeToString(clone);
+    return { dataURL: 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(xml))) };
+  }
+  /** Scroll a picture into view; its box in screenshot pixels (for cropping a screenshot of the visible tab). */
+  async function showRect(ref) {
+    const el = reg.els[ref];
+    if (!el) return null;
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    clearOverlay(); // the outlines must not be in the screenshot
+    await new Promise((res) => setTimeout(res, 300));
+    const dpr = window.devicePixelRatio || 1, b = el.getBoundingClientRect();
+    return { x: Math.max(0, b.left) * dpr, y: Math.max(0, b.top) * dpr, w: Math.min(b.width, innerWidth - Math.max(0, b.left)) * dpr, h: Math.min(b.height, innerHeight - Math.max(0, b.top)) * dpr };
   }
 
   // ── fill ─────────────────────────────────────────────────────────────
@@ -345,6 +406,6 @@
     return { framePath, found };
   }
 
-  window.__pdbAgent = { scan, sample, locateValues, aiText, setMarks, clearOverlay, focusMark, startPick, stopPick, fillScan, fillApply, fillUndo, rectsOf,
+  window.__pdbAgent = { scan, sample, locateValues, aiText, setMarks, clearOverlay, focusMark, startPick, stopPick, fillScan, fillApply, fillUndo, rectsOf, imageData, showRect, checkTemplate,
     textOfRef: (ref) => (reg.els[ref] ? PDB.dom.textOf(reg.els[ref]) : '') };
 })();

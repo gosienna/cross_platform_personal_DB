@@ -323,3 +323,51 @@ test('side panel: another page of the same site gives separate values; a differe
   const nameBox = [...common.querySelectorAll('label')].find((l) => l.textContent.trim() === 'Name');
   assert.ok(nameBox && nameBox.querySelector('input').checked);
 });
+
+test('side panel: a picture in the page template — values reused per picture, a new picture listed to read with AI', async () => {
+  const html = `<html><body><table><tr><th>姓名</th><td>測試癸</td></tr><tr><th>身分證字號</th><td>B123456789</td></tr><tr><th>填表日期</th><td>2026-11-20</td></tr></table>
+    <div><span>血糖趨勢圖</span><img id="chart" src="/chart.png"></div></body></html>`;
+  const url = 'https://his.example/form/1234';
+  const dom = new JSDOM(html, { url, runScripts: 'outside-only', pretendToBeVisual: true });
+  dom.window.chrome = { runtime: { sendMessage() {} } };
+  const LIBS = ['lib/schema.js', 'lib/core.js', 'lib/dom.js', 'lib/templates.js', 'lib/pagetpl.js', 'lib/fill.js', 'lib/redact.js', 'content/agent.js'];
+  for (const f of LIBS) dom.window.eval(fs.readFileSync(path.join(ROOT, 'extension', f), 'utf8'));
+  // jsdom draws no pictures: the page agent hands over fixed pixels
+  let pixels = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  dom.window.__pdbAgent.imageData = async (refs) => refs.map((ref) => ({ ref, dataURL: pixels }));
+  const { w, errors } = await loadPage('sidepanel/sidepanel.html', { dom, url });
+  w.fetch = globalThis.fetch;
+  // the page's template: the rules' draft plus the taught picture
+  const P = dom.window.PDB;
+  const rules = P.dom.extractFromRoot(dom.window.document, { origin: 'https://his.example', registry: P.dom.makeRegistry(), templates: [] });
+  const tpl = P.pagetpl.draft(dom.window.document, rules, { origin: 'https://his.example', framePath: '/form/*', query: '' });
+  const { value, framePath, ...f } = P.pagetpl.fieldFor({ el: dom.window.document.querySelector('#chart') });
+  P.pagetpl.addField(tpl, f, { label: 'Blood glucose', from: 'taught' });
+  await w.PDB.db.savePageTemplate(JSON.parse(JSON.stringify({ ...tpl, complete: true })));
+  const key = async () => `${await w.PDB.db.sha256(await w.UI.dataURLtoBlob(pixels))}|Blood glucose`;
+  await w.PDB.db.putImageReading(await key(), { rows: [{ label: 'Blood glucose (AC)', value: '126', time: '2026-11-20 07:30', exact: true }, { label: 'Blood glucose', value: '150', time: '2026-11-21 07:30', exact: false }] });
+
+  w.document.querySelector('#scan').click();
+  await tick(600);
+  assert.deepEqual(errors, []);
+  const rowOf = (v) => [...w.document.querySelectorAll('#records tr')].find((tr) => { const i = tr.querySelector('td.v input'); return i && i.value === v; });
+  const r126 = rowOf('126');
+  assert.ok(r126, w.document.querySelector('#records').textContent);
+  assert.match(r126.textContent, /Blood glucose \(AC\)/);
+  assert.match(r126.textContent, /picture/);
+  assert.match(r126.textContent, /⏱ written in the picture/);
+  assert.equal(r126.querySelector('input[type=checkbox]').checked, true);
+  const r150 = rowOf('150');
+  assert.equal(r150.querySelector('input[type=checkbox]').checked, false, 'a value estimated from the chart starts unticked');
+  assert.match(r150.textContent, /estimated from picture/);
+  assert.match(w.document.querySelector('#pages').textContent, /1 picture read before: values reused/);
+
+  // the chart changed: a new picture, listed to read (nothing is sent until you press Read with AI and review it)
+  pixels = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+  w.document.querySelector('#scan').click();
+  await tick(600);
+  assert.ok(!rowOf('126'), 'the old picture’s values are not reused for a new picture');
+  assert.match(w.document.querySelector('#pages').textContent, /1 picture not read yet \(Blood glucose\)/);
+  assert.ok([...w.document.querySelectorAll('#pages button')].some((b) => b.textContent === 'Read with AI'));
+  assert.deepEqual(errors, []);
+});

@@ -76,21 +76,21 @@
     return { records, regions: [], broken: [] };
   }
 
-  async function callClaude({ apiKey, text, imageB64 }) {
+  async function callClaude({ apiKey, text, imageB64, system = systemPrompt(), schema = SCHEMA, prefix = 'Page text:\n<page>\n', suffix = '\n</page>' }) {
     if (!g.Anthropic) throw new Error('The Anthropic SDK is not bundled yet. Run "npm run build:vendor" and reload the extension.');
     const Anthropic = g.Anthropic.default || g.Anthropic;
     const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
     const content = [];
     if (imageB64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageB64 } });
-    content.push({ type: 'text', text: `Page text:\n<page>\n${text}\n</page>` });
+    content.push({ type: 'text', text: `${prefix}${text}${suffix}` });
     const response = await client.beta.messages.create({
       model: MODEL,
       max_tokens: 16000,
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',
       thinking: { type: 'adaptive' },
-      output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } },
-      system: systemPrompt(),
+      output_config: { effort: 'medium', format: { type: 'json_schema', schema } },
+      system,
       messages: [{ role: 'user', content }],
     });
     if (response.stop_reason === 'refusal') throw new Error('Claude declined this request' + (response.stop_details && response.stop_details.explanation ? `: ${response.stop_details.explanation}` : '.'));
@@ -221,5 +221,122 @@
     await onResult([{ frameId: 0, result: toFrameResult(parsed, map) }]);
   }
 
-  g.AIFlow = { run, toFrameResult, SCHEMA, systemPrompt };
+  // ── reading a picture (image fields of a page template) ─────────────
+  const IMAGE_SCHEMA = {
+    type: 'object', additionalProperties: false, required: ['rows'],
+    properties: {
+      rows: {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false, required: ['label', 'value', 'time', 'exact'],
+          properties: { label: { type: 'string' }, value: { type: 'string' }, time: { type: 'string' }, exact: { type: 'boolean' } },
+        },
+      },
+    },
+  };
+  function imagePrompt() {
+    const labels = PDB.schema.VOCAB.map((v) => `${v.label}${v.unit ? ` (${v.unit})` : ''}${v.persistent ? ' [persistent]' : ''}`).join('; ');
+    return [
+      'You read patient data from one picture taken from a health-information-system page: a chart, a scanned or photographed form, a photo of a meter, a table drawn as an image. Text is often Traditional Chinese; dates may be ROC (115/10/07 = 2026-10-07).',
+      'Personal details may have been blacked out before you received the picture. Never guess what is under a black box.',
+      'You are told what the page calls this picture. Return every data point the picture shows as one row.',
+      `"label": use these canonical labels when they fit: ${labels}. For anything else use the label as written in the picture. When the picture shows one kind of value without naming it, use the name the page gives the picture.`,
+      'Values: numbers without units, converted to the unit shown in brackets; blood pressure as "systolic/diastolic"; dates as YYYY-MM-DD; blood glucose with a meal-time tag as "Blood glucose (AC)" / "(PC)" / "(HS)". Medication: label "Medication", value "drug strength; dose; frequency; route; days; start~end".',
+      '"time": "nan" for labels marked [persistent]; otherwise the time this value was measured or recorded as written in the picture, as "YYYY-MM-DD HH:mm" or "YYYY-MM-DD", in local time; "" when the picture shows no time for it.',
+      '"exact": true when the value is written in the picture (a number, a data label, text); false when you estimated it from a point\'s position against the axes. Prefer written values; only estimate when nothing is written, and then round sensibly.',
+      'Skip titles, legends, axis ticks, logos and anything that is not a data point. Do not invent data. If the picture shows no data, return no rows.',
+    ].join('\n');
+  }
+  const loadImage = (src) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('This picture cannot be shown (unknown format).')); i.src = src; });
+  const MAX_EDGE = 1568; // larger pictures are scaled down (what Claude reads best; smaller requests)
+  /**
+   * Review one picture before it is sent: earlier black boxes (field.mask) are drawn again, you can drag more or clear
+   * them, and you must tick that you checked it. Resolves { image (PNG base64), mask } or null (skip) / false (cancel all).
+   */
+  function imageDialog({ dataURL, label, hint, mask, index, count }) {
+    const { h, $ } = g.UI;
+    return loadImage(dataURL).then((img) => new Promise((resolve) => {
+      const dlg = $('#dlg'), form = $('#dlgForm');
+      dlg.style.width = '640px';
+      form.textContent = '';
+      const k = Math.min(1, MAX_EDGE / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
+      const W = Math.max(1, Math.round((img.naturalWidth || img.width) * k)), H = Math.max(1, Math.round((img.naturalHeight || img.height) * k));
+      const canvas = h('canvas', { style: 'max-width:100%;border:1px solid #ccc;cursor:crosshair;background:#fff' });
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      let boxes = (mask || []).map((b) => ({ ...b }));
+      const paint = () => {
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+        ctx.drawImage(img, 0, 0, W, H);
+        ctx.fillStyle = '#000';
+        for (const b of boxes) ctx.fillRect(b.x * W, b.y * H, b.w * W, b.h * H);
+      };
+      let start = null;
+      const at = (e) => { const r = canvas.getBoundingClientRect(); return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) }; };
+      canvas.onmousedown = (e) => { start = at(e); };
+      canvas.onmouseup = (e) => {
+        if (!start) return;
+        const p = at(e);
+        const b = { x: Math.min(p.x, start.x), y: Math.min(p.y, start.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) };
+        start = null;
+        if (b.w * W < 3 || b.h * H < 3) return;
+        boxes.push(b); paint(); checked.checked = false; sync();
+      };
+      const checked = h('input', { type: 'checkbox', onchange: () => sync() });
+      const sendBtn = h('button', { class: 'primary', type: 'button', onclick: () => dlg.close('send') }, 'Send to Claude');
+      const sync = () => { sendBtn.disabled = !checked.checked; };
+      const clear = h('button', { type: 'button', onclick: () => { boxes = []; paint(); checked.checked = false; sync(); } }, 'Clear black boxes');
+      form.append(
+        h('b', {}, `Read the picture “${label}” with Claude${count > 1 ? ` (${index + 1} of ${count})` : ''}`),
+        h('p', { class: 'small mut' }, 'Only this picture (with the black boxes) and the text below leave your computer. Text inside pictures cannot be detected automatically: drag on the picture to black out names, ID numbers, faces or anything else you do not want to send.',
+          mask && mask.length ? ' The boxes you drew last time for this picture are already applied.' : ''),
+        canvas,
+        h('div', { class: 'btns', style: 'justify-content:flex-start' }, clear),
+        h('div', { class: 'payload small' }, hint),
+        h('label', { class: 'small' }, checked, ' I checked the picture and it shows no personal data I don\'t want to send'),
+        h('div', { class: 'btns' }, h('button', { type: 'button', onclick: () => dlg.close('') }, 'Cancel'), h('button', { type: 'button', onclick: () => dlg.close('skip') }, 'Skip this picture'), sendBtn));
+      dlg.onclose = () => {
+        const v = dlg.returnValue;
+        resolve(v === 'send' ? { image: canvas.toDataURL('image/png').split(',')[1], mask: boxes } : v === 'skip' ? null : false);
+      };
+      dlg.returnValue = '';
+      paint(); sync();
+      dlg.showModal();
+    }));
+  }
+  /** The text sent with a picture: what the page calls it, with any identifiers in it masked (never sent). */
+  function imageHint(label, anchor, settings) {
+    const near = anchor && PDB.core.cleanLabel(anchor) !== label ? ` It sits next to the text “${anchor.slice(0, 60)}”.` : '';
+    const raw = `The page calls this picture “${label}”.${near}`;
+    const { text, spans } = PDB.redact.detect(raw, [], { categories: settings.privacy.categories, customTerms: settings.privacy.customTerms });
+    const { out } = PDB.redact.apply(text, spans.map((x) => ({ ...x, decision: 'mask' })));
+    return out;
+  }
+  /**
+   * Read pictures with Claude, one review per picture. pics: [{ dataURL, label, anchor, mask }].
+   * Calls onRead(i, { rows, mask }) for each picture read; stops at Cancel. Returns how many were read.
+   */
+  async function readImages({ pics, source, status, onRead }) {
+    const s = await PDB.db.getSettings();
+    if (!s.ai.enabled || !s.ai.apiKey) throw new Error('Reading pictures uses AI, which is off. Turn it on in Dashboard → Settings with your own Anthropic API key.');
+    let n = 0;
+    for (let i = 0; i < pics.length; i++) {
+      const p = pics[i];
+      const hint = imageHint(p.label, p.anchor, s);
+      status(`Review picture ${i + 1} of ${pics.length}…`);
+      const review = await imageDialog({ dataURL: p.dataURL, label: p.label, hint, mask: p.mask, index: i, count: pics.length });
+      if (review === false) break;
+      if (!review) continue;
+      const check = PDB.redact.finalCheck(hint, []);
+      if (!check.ok) { await blocked(check.left); break; }
+      await audit({ at: Date.now(), source, text: hint, image: `data:image/png;base64,${review.image}` });
+      status(`Claude is reading “${p.label}”… (only the picture with its black boxes and the line of text above were sent)`);
+      const parsed = await callClaude({ apiKey: s.ai.apiKey, text: hint, imageB64: review.image, system: imagePrompt(), schema: IMAGE_SCHEMA, prefix: '', suffix: '' });
+      await onRead(i, { rows: (parsed.rows || []).filter((r) => r && String(r.value || '').trim()), mask: review.mask });
+      n++;
+    }
+    return n;
+  }
+
+  g.AIFlow = { run, toFrameResult, SCHEMA, systemPrompt, readImages, imagePrompt, IMAGE_SCHEMA, imageHint };
 })(globalThis);

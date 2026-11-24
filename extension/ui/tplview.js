@@ -216,7 +216,7 @@
       const tr = h('tr', { 'data-u': u.id, class: roleClass(u), onmouseenter: () => setHot(u.id), onmouseleave: () => setHot(null) },
         h('td', {}, h('span', { class: `dot ${roleClass(u)}` }), ' ', u.kind === 'table' ? nameOf(u) : u.label === PT.IGNORE ? h('i', {}, `${u.prevLabel || PT.fieldName(u)} (not saved)`) : u.label,
           u.role === 'time' ? h('span', { class: 'badge' }, 'time only') : null),
-        h('td', { class: 'small mut' }, u.kind === 'table' ? `${u.map.layout}` : (u.rawLabel && C.cleanLabel(u.rawLabel) !== u.label ? C.cleanLabel(u.rawLabel) : u.anchor || '') + (u.part ? ' (part)' : '')),
+        h('td', { class: 'small mut' }, u.kind === 'table' ? `${u.map.layout}` : (u.kind === 'image' ? '🖼 picture, read by AI' + (u.anchor ? ` · ${u.anchor}` : '') : (u.rawLabel && C.cleanLabel(u.rawLabel) !== u.label ? C.cleanLabel(u.rawLabel) : u.anchor || '') + (u.part ? ' (part)' : ''))),
         h('td', {}, chip(u)),
         h('td', { class: 'acts' }, actions(u)));
       list.append(tr);
@@ -271,6 +271,7 @@
     async function editUnit(u) {
       const isT = u.kind === 'table';
       const timeOpts = [['nan', 'Fixed: no time (the value does not change)'], ['capture', 'Capture time (when you press Scan)']];
+      if (u.kind === 'image') timeOpts.unshift(['image', 'The time written in the picture (e.g. a chart’s dates; capture time if it shows none)']);
       if (isT && u.map.layout === 'chart') timeOpts.push(['column', 'Each column’s date (column headers)']);
       if (isT && u.map.layout === 'list') for (const c of PT.timeColumns(u)) timeOpts.push([`col:${c.i}`, `Column “${c.header}”`]);
       for (const f of tpl.fields) {
@@ -313,7 +314,7 @@
       }
       if (!fixed && timeKey !== curKey) {
         if (timeKey === 'pick') { await save(); return startPick('time', u); }
-        const link = timeKey === 'nan' ? { mode: 'nan' } : timeKey === 'capture' ? { mode: 'capture' } : timeKey === 'column' ? { mode: 'column' }
+        const link = timeKey === 'nan' ? { mode: 'nan' } : timeKey === 'capture' ? { mode: 'capture' } : timeKey === 'image' ? { mode: 'image' } : timeKey === 'column' ? { mode: 'column' }
           : timeKey.startsWith('col:') ? { mode: 'column', cols: timeKey.slice(4).split(',').map(Number) } : { mode: 'field', field: timeKey.slice(2) };
         PT.setTime(tpl, u.id, link);
       }

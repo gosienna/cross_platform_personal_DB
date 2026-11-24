@@ -7,14 +7,18 @@
  *     column, or the capture time.
  *
  *   PageTemplate { id, v: 2, origin, framePath, title, complete, createdAt, updatedAt, fields: [Field], tables: [Table] }
- *   Field  { id, kind: 'text'|'control'|'group', selector, context, anchor, tag, part?, group,
+ *   Field  { id, kind: 'text'|'control'|'group'|'image', selector, context, anchor, tag, part?, group, mask?,
  *            label ('__ignore__' = known, not saved), rawLabel, role: 'data'|'identity'|'recordDate'|'time',
  *            unmapped?, time: TimeLink, from: 'rule'|'taught'|'ai'|'sample', how }
  *            part: which bit of the element's text: { line } | { word } | { inline: label } (default: all of it)
  *            group: fields of one group form one record (one patient), e.g. a label/value table
+ *            kind 'image': a picture (chart, scanned form, photo of a meter). It has no page text: extract() lists it in
+ *              `images`, and the side panel adds the values Claude read from it (see imageItems). mask = the boxes
+ *              blacked out before sending, as fractions of the picture ([{ x, y, w, h }], 0–1), offered again next time.
  *   Table  { id, kind: 'table', layout: 'list'|'chart', selector, context, tag: 'TABLE', map, time: TimeLink, from }
  *            map: how columns (list) or rows (chart) are read; see core.listMap / core.chartMap
  *   TimeLink { mode: 'nan' } | { mode: 'field', field: <field id> } | { mode: 'column', cols? } | { mode: 'capture' }
+ *            | { mode: 'image' } (image fields: the time written in the picture, e.g. a chart's dates; capture time if none)
  */
 (function (g) {
   const PDB = (g.PDB = g.PDB || {});
@@ -37,6 +41,7 @@
     return lines.join('\n');
   }
   function readField(f, p) {
+    if (f.kind === 'image') return '';
     if (p.group) return D().groupValue(p.group);
     if (isCtl(p.el)) return D().readControl(p.el);
     return partOf(p.el, f.part);
@@ -81,6 +86,7 @@
       if (!f) return { mode: 'field', text: '← (field missing)', warn: true };
       return { mode: 'field', text: f.id === unit.id ? 'own value' : `← ${fieldName(f)}` };
     }
+    if (l.mode === 'image' && unit.kind === 'image') return { mode: 'image', text: 'written in the picture' };
     if (l.mode === 'column' && unit.kind === 'table') {
       if (unit.map.layout === 'chart') return { mode: 'column', text: '← column headers' };
       const names = (l.cols || []).map((i) => (unit.map.columns.find((c) => c.i === i) || {}).header).filter(Boolean);
@@ -99,6 +105,7 @@
   function defaultTime(tpl, f) {
     if (isPersistent(f.label)) return { mode: 'nan' };
     if (f.role === 'recordDate') return { mode: 'field', field: f.id };
+    if (f.kind === 'image') return { mode: 'image' };
     const rd = recordDateFor(tpl, f.group);
     return rd ? { mode: 'field', field: rd.id } : { mode: 'capture' };
   }
@@ -242,7 +249,7 @@
         }
         return { t: undefined };
       };
-      const units = [], groups = new Map(), regions = [];
+      const units = [], groups = new Map(), regions = [], images = [];
       for (const f of tpl.fields) {
         if (f.label === IGNORE || f.role === 'time') continue;
         const l = located.get(f.id);
@@ -250,6 +257,12 @@
         if (!groups.has(f.group)) { const rec = C().newRecord(); groups.set(f.group, rec); units.push({ el: l.box, recs: [rec], page: f.group === 'p' }); }
         const rec = groups.get(f.group);
         const tm = timeOf(f.time);
+        if (f.kind === 'image') {
+          // no page text to read: the side panel reads the picture (or reuses its earlier reading) and adds its values
+          images.push({ fid: f.id, ref: reg.id(l.el), label: f.label, anchor: f.anchor || '', tag: l.el.tagName, rec, t: tm.t, timeRef: tm.ref != null ? tm.ref : null,
+            mode: (f.time && f.time.mode) || 'capture', mask: f.mask || [] });
+          continue;
+        }
         const n = rec.items.length, m = rec.meds.length;
         C().addMapped(rec, { label: f.label, rawLabel: f.rawLabel || f.label, recordDate: f.role === 'recordDate', how: f.from === 'rule' ? f.how : 'template',
           unmapped: !!f.unmapped, strict: true, fid: f.id }, l.raw, ctx, reg.id(l.box), tm.t);
@@ -280,7 +293,8 @@
       const records = units.flatMap((u) => u.recs);
       const pageRec = units.find((u) => u.page);
       if (pageRec) regions.push({ ref: null, kind: 'fields', items: pageRec.recs[0].items.length });
-      return { records, regions, broken, located, changed, registry: reg };
+      for (const im of images) im.rec = records.indexOf(im.rec); // which record the picture's values belong to
+      return { records, regions, broken, located, changed, registry: reg, images };
     });
   }
 
@@ -315,6 +329,38 @@
       out.push({ unit: f, value: values.get(f.id), ref: reg.id(el) });
     }
     return out;
+  }
+
+  /**
+   * Values Claude read from a picture (an image field) → items of the picture's record, as if read from the page.
+   * reading: { rows: [{ label, value, time, exact }] } (kept per picture by the side panel, so the same picture always
+   *   gives the same values); img: an entry of extract()'s `images`.
+   * Time: with the field's time link 'image', each value's own time from the picture (capture time when it shows none);
+   * with any other link, that link's time, as for any field. Values estimated from a chart's axes (exact: false) are flagged.
+   */
+  function imageItems(rec, reading, img, ctx = {}) {
+    let k = 0;
+    for (const row of (reading && reading.rows) || []) {
+      const r = C().resolveLabel(row.label || '', ctx);
+      if (r && r.ignore) continue;
+      let label = (r && r.label) || C().cleanLabel(row.label || '') || img.label;
+      const tag = /\((AC|PC|HS)\)\s*$/i.exec(row.label || ''); // a glucose meal-time tag stays in the label
+      if (tag && r && r.entry && r.entry.type === 'glucose') label = `${r.entry.label} (${tag[1].toUpperCase()})`;
+      let t = img.t;
+      if (img.mode === 'image') {
+        const tt = String(row.time || '').trim();
+        const p = tt && tt !== 'nan' ? C().parseDateTime(tt) : null;
+        t = tt === 'nan' ? 'nan' : p && p.kind !== 'relative' ? C().formatTime(p) : undefined;
+      }
+      const n = rec.items.length;
+      C().addMapped(rec, { label, rawLabel: row.label || img.label, how: 'image', strict: true, fid: img.fid }, String(row.value == null ? '' : row.value), ctx, img.ref, t);
+      for (const it of rec.items.slice(n)) {
+        if (img.timeRef != null && img.mode !== 'image') it.timeRef = img.timeRef;
+        if (row.exact === false) { it.estimated = true; it.warn = it.warn || 'estimated_from_picture'; }
+        k++;
+      }
+    }
+    return k;
   }
 
   // ── which template is this page? (layout first, address second) ─────
@@ -484,8 +530,8 @@
   /** A clicked element (Teach / pick in the sample page) → a field. target: { el, group? } */
   function fieldFor(target) {
     const { el, group } = target;
-    const kind = group ? 'group' : isCtl(el) ? 'control' : 'text';
-    const value = group ? D().groupValue(group) : kind === 'control' ? D().readControl(el) : D().textOf(el);
+    const kind = group ? 'group' : D().isPicture(el) ? 'image' : isCtl(el) ? 'control' : 'text';
+    const value = group ? D().groupValue(group) : kind === 'image' ? '' : kind === 'control' ? D().readControl(el) : D().textOf(el);
     const anchor = group ? group.label || T().anchorFor(el) : T().anchorFor(el);
     return {
       kind, selector: T().selectorFor(el), anchor, rawLabel: anchor || '', context: T().contextFor(el), tag: el.tagName,
@@ -551,7 +597,7 @@
       if (!el || el.nodeType !== 1) continue;
       if (t.unit.kind === 'table') { el.setAttribute('data-pdb-t', t.unit.id); maskTable(el, t.unit, t.live); continue; }
       el.setAttribute('data-pdb-f', [el.getAttribute('data-pdb-f'), t.unit.id].filter(Boolean).join(' '));
-      if (t.unit.kind === 'group') continue; // option labels are page text; the ticks are cleared below
+      if (t.unit.kind === 'group' || t.unit.kind === 'image') continue; // option labels are page text (ticks cleared below); pictures become grey boxes below
       const name = t.unit.role === 'recordDate' || t.unit.role === 'time' ? 'time' : fieldName(t.unit);
       if (!labelsAt.has(el)) labelsAt.set(el, []);
       labelsAt.get(el).push(name);
@@ -683,5 +729,5 @@
   }
 
   PDB.pagetpl = { IGNORE, newId, draft, extract, uncovered, match, addressScore, rememberAddress, snapshot, maskText, cleanCss, unitOf, timeText, timeColumns, fieldName, defaultTime,
-    setLabel, removeUnit, restoreUnit, deleteUnit, timeUsers, setTime, addField, sameLabel, addTable, fieldFor, locateUnit, findTable, isPersistent, readField };
+    setLabel, removeUnit, restoreUnit, deleteUnit, timeUsers, setTime, addField, sameLabel, addTable, fieldFor, imageItems, locateUnit, findTable, isPersistent, readField };
 })(globalThis);

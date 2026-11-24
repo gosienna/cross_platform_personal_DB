@@ -129,6 +129,14 @@ Hover a chip to outline the value and its time source on the page. Click it to c
   - A click on any tick box, radio button or tick-box picture, or on its text, teaches the **whole group**; its value is the ticked options.
   - It is found again by its position, and by the text before it if the layout shifts.
   - **Fill uses it too**: a field on a read-only page is found on the edit form by the text before it, and the other way round.
+- **Teach a picture**: click a chart, a scanned form or a photo of a meter (an `<img>`, `<canvas>` or `<svg>`) and say what it shows, e.g. `Blood glucose`. It becomes an **image field** of the page's template. Pictures have no text, so their content is read by AI (it needs AI turned on; see Privacy below):
+  - **Found again** like any field, by its position and the text before it. A picture must also have the same caption or label right before it, so a chart that moves into its place (temperature instead of glucose) is never read as it.
+  - **Read with AI.** On a scan, the banner lists pictures not read yet. **Read with AI** opens a review of each picture: black out names, ID numbers or faces by dragging, tick *I checked the picture*, then send. The boxes you drew are offered again for that field's next picture. Claude returns one row per value the picture shows.
+  - **Each picture is read once.** What Claude read is kept on this computer, keyed by the picture's content (sha256 of its pixels) and the field's label. The next scan of the same picture reuses those values without sending anything; a changed picture (new readings on the chart) is listed to read again. **Read again** forgets the kept values and reads anew. The kept readings are not in exports or backups, and **clear all data** removes them.
+  - **Time.** By default each value takes the time written in the picture (a chart's dates), or the capture time when it shows none. The ⏱ chip can link it to a date on the page instead, like any field.
+  - **Estimates.** A value Claude estimated from a point's position on the axes, rather than read from a written number, is marked *estimated from picture* and starts unticked.
+  - The rows carry a **picture** badge and are reviewed and saved like the others. Fill never uses image fields.
+  - A picture from another site is fetched by the extension. A canvas that can't be read is cropped from a screenshot (top frame only).
 - **Screenshot** / **Pick media**: save the visible page, or an image, chart, audio clip or video.
 - **AI extract**: Claude reads a masked copy of the page (see Privacy below). Its answer becomes **suggested changes to the page's template**: new fields, better labels, and the date each value belongs to. Each value is found on the page itself; you tick what to apply. Values are never saved from the AI's answer directly, so the page is read the same way every time. Values that aren't one element of the page are listed as not found.
 
@@ -202,14 +210,16 @@ Every request goes through the privacy gate in [extension/lib/redact.js](extensi
    - You can also select any other text to mask it.
    - Per category, choose in Settings: always mask, ask, or send.
 4. **Screenshots** (optional). Known personal fields are blacked out, and you can draw more boxes yourself. You must tick "I checked the image" before it can be sent.
+   - **Pictures of image fields** (see *Teach a picture*) go through their own review: only the picture with your black boxes is sent, plus one line naming the picture (identifiers in it are masked). You must tick *I checked the picture* every time. Text inside pictures can't be detected automatically, so check it yourself.
 5. **Hard block.** If a national ID, phone number or email is still in the outgoing text and you didn't explicitly approve it, nothing is sent.
 6. **Back to real values locally.** The reply contains only placeholders; they are swapped back to the real values in the side panel. The values are then looked up on the page and offered as changes to the page's template; nothing from the reply is saved as data.
+   - The one exception is **image fields**. A picture has no page text to look values up in, so what Claude read from it becomes rows in the preview (badge *picture*). You review them before Save, and they are kept per picture so the same picture always gives the same values.
 7. **Audit log.** The last 20 payloads exactly as sent are kept locally, in **Settings → Audit log**.
 
 ## Development
 
 ```
-npm test            # 81 tests: extraction, page templates (parity with the rules, strict reading, time links, sample pages), fill, export/FHIR/zip, crypto, backup, privacy gate, UI smoke
+npm test            # 113 tests: extraction, page templates (parity with the rules, strict reading, time links, sample pages, image fields), fill, export/FHIR/zip, crypto, backup, privacy gate, UI smoke
 npm run check       # syntax check of every extension script
 npm run build:vendor  # re-bundle @anthropic-ai/sdk and SheetJS into extension/vendor/
 ```

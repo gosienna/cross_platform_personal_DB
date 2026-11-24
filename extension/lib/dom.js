@@ -635,6 +635,21 @@
     return { records, regions, registry: reg, broken, found, pairInfo };
   }
 
+  /**
+   * The picture an element is (or is inside): an <img>, a <canvas> or an outermost <svg> — not a tick-box picture,
+   * which is an option of a group. Used for image fields (their content is read by Claude, see ai.js readImage).
+   */
+  const PICTURE = /^(IMG|CANVAS|svg|SVG)$/;
+  function pictureAt(el) {
+    if (!el || el.nodeType !== 1 || !el.closest) return null;
+    let pic = el.closest('img,canvas,svg');
+    if (!pic) return null;
+    if (/^svg$/i.test(pic.tagName)) for (let up = pic.parentElement && pic.parentElement.closest('svg'); up; up = up.parentElement && up.parentElement.closest('svg')) pic = up;
+    if (isImgOption(pic)) return null;
+    return pic;
+  }
+  const isPicture = (el) => !!el && el.nodeType === 1 && PICTURE.test(el.tagName) && !isImgOption(el);
+
   PDB.dom = { textOf, linesOf, gridOf, precedingText, labelCandidates, bestLabel, collectPairs, extractFromRoot,
-    makeRegistry, isHidden, optionState, controlValue, readControl, splitInlinePairs, isSegment, OVERLAY_ID, optionGroups, optionLabelText, groupLabel, optionsIn, optionChecked, groupKeyOf, radioGroupOf, groupValue, optionAt, groupOf, isImgOption };
+    makeRegistry, isHidden, optionState, controlValue, readControl, splitInlinePairs, isSegment, OVERLAY_ID, optionGroups, optionLabelText, groupLabel, optionsIn, optionChecked, groupKeyOf, radioGroupOf, groupValue, optionAt, groupOf, isImgOption, pictureAt, isPicture };
 })(globalThis);

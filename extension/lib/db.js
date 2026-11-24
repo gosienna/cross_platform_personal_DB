@@ -184,6 +184,7 @@
     const tx = db.transaction(['rows', 'blobs'], 'readwrite');
     tx.objectStore('rows').clear(); tx.objectStore('blobs').clear();
     await done(tx);
+    await set('imageReadings', {});
     await touch();
   }
 
@@ -293,6 +294,27 @@
       if (area === 'local' && ch.settings) C().setCommonLabels((ch.settings.newValue || {}).commonLabels ?? null);
     });
   }
+  /*
+   * What Claude read from pictures (image fields), so the same picture always gives the same values and is sent once:
+   *   imageReadings: { '<sha256 of the picture>|<field label>': { rows: [{ label, value, time, exact }], at } }
+   * Kept on this computer only (patient values: not in exports or backups; cleared with all data). The newest 500 are kept.
+   */
+  const READINGS_KEEP = 500;
+  async function getImageReadings(keys) {
+    const all = await get('imageReadings', {});
+    return Object.fromEntries(keys.filter((k) => all[k]).map((k) => [k, all[k]]));
+  }
+  async function putImageReading(key, reading) {
+    const all = await get('imageReadings', {});
+    all[key] = { rows: reading.rows || [], at: Date.now() };
+    const keep = Object.entries(all).sort((a, b) => b[1].at - a[1].at).slice(0, READINGS_KEEP);
+    await set('imageReadings', Object.fromEntries(keep));
+  }
+  async function forgetImageReadings(keys) {
+    const all = await get('imageReadings', {});
+    for (const k of keys) delete all[k];
+    await set('imageReadings', all);
+  }
   const getSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await get('settings', {})) });
   const saveSettings = async (patch) => set('settings', { ...(await getSettings()), ...patch });
 
@@ -305,5 +327,6 @@
 
   PDB.db = { open, putRows, editValue, setCommonLabels, deleteRows, allRows, rowsByPatient, rowsByLabels, existingFor, patients, mergePatients, clearAll,
     sha256, putBlob, getBlob, allBlobMeta, get, set, getVocab, learnAlias, getTemplates, saveTemplates, getSettings, saveSettings, DEFAULT_SETTINGS,
-    migrateTemplates, getPageTemplates, savePageTemplates, savePageTemplate, deletePageTemplate, putSample, getSample, allSamples };
+    migrateTemplates, getPageTemplates, savePageTemplates, savePageTemplate, deletePageTemplate, putSample, getSample, allSamples,
+    getImageReadings, putImageReading, forgetImageReadings };
 })(globalThis);
