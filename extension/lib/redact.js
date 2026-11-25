@@ -10,9 +10,9 @@
   const PDB = (g.PDB = g.PDB || {});
   const nfkc = (s) => String(s || '').normalize('NFKC');
 
-  const CAT = { name: 'NAME', id: 'ID', mrn: 'MRN', phone: 'PHONE', email: 'EMAIL', address: 'ADDR', dob: 'DOB', number: 'NUM', term: 'TERM' };
+  const CAT = { name: 'NAME', id: 'ID', mrn: 'MRN', phone: 'PHONE', email: 'EMAIL', address: 'ADDR', dob: 'DOB', number: 'NUM', term: 'TERM', blocked: 'BLOCKED' };
   const LABEL_CAT = { 'Name': 'name', 'Nickname': 'name', 'National ID': 'id', 'MRN': 'mrn', 'Phone': 'phone', 'Mobile': 'phone', 'Email': 'email', 'Address': 'address', 'Registered address': 'address', 'Birth date': 'dob' };
-  const CAT_LABEL = { name: 'Name', id: 'National ID', mrn: 'MRN', phone: 'Phone', email: 'Email', address: 'Address', dob: 'Birth date', number: 'Long number', term: 'Custom term' };
+  const CAT_LABEL = { name: 'Name', id: 'National ID', mrn: 'MRN', phone: 'Phone', email: 'Email', address: 'Address', dob: 'Birth date', number: 'Long number', term: 'Custom term', blocked: 'Blocked by you' };
 
   const PATTERNS = [
     { cat: 'id', conf: 'high', re: /(?<![A-Za-z0-9])[A-Z][12ABCD89]\d{8}(?![0-9])/g },

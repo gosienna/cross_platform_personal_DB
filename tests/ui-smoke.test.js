@@ -399,3 +399,35 @@ test('dashboard: Mappings → Export check downloads one template checked agains
   assert.ok(!text.includes('測試甲'), 'no patient value');
   assert.equal(w.document.querySelector('#ptDetail').textContent, '', 'the row was not opened by the click');
 });
+
+test('AI review: select text and Block it (here or everywhere), type a value to block, click to unblock', async () => {
+  const { w, errors } = await loadPage('sidepanel/sidepanel.html');
+  assert.deepEqual(errors, []);
+  const d = w.document;
+  const text = 'Bed A1 Chen Mei, called Chen Mei again';
+  const done = w.AIFlow.reviewDialog({ text, spans: [], truncated: false, screenshot: null, boxes: [] });
+  const pane = d.querySelector('#dlgForm .payload');
+  // select the first "Chen Mei" (with a leading space, which is trimmed)
+  const node = pane.querySelector('span').firstChild;
+  const r = d.createRange();
+  r.setStart(node, text.indexOf('Chen') - 1); r.setEnd(node, text.indexOf('Chen') + 8);
+  w.getSelection().removeAllRanges(); w.getSelection().addRange(r);
+  pane.dispatchEvent(new w.MouseEvent('mouseup', { bubbles: true }));
+  await tick(20);
+  const pop = d.querySelector('.blockpop');
+  assert.equal(pop.hidden, false);
+  const [one, all] = pop.querySelectorAll('button');
+  assert.equal(all.textContent, 'Block all 2');
+  all.click();
+  assert.equal(pane.querySelectorAll('mark.you').length, 2);
+  pane.querySelector('mark.you').click(); // unblock one
+  assert.equal(pane.querySelectorAll('mark.you').length, 1);
+  const input = d.querySelector('#dlgForm input[type=text]');
+  input.value = 'A1';
+  input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  assert.equal(pane.querySelectorAll('mark.you').length, 2);
+  [...d.querySelectorAll('#dlgForm button')].find((b) => b.textContent === 'Send to Claude').click();
+  const res = await done;
+  const { out } = w.PDB.redact.apply(text, res.spans);
+  assert.equal(out, 'Bed [BLOCKED_1] Chen Mei, called [BLOCKED_2] again');
+});

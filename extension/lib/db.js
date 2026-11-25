@@ -315,18 +315,35 @@
     for (const k of keys) delete all[k];
     await set('imageReadings', all);
   }
-  const getSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await get('settings', {})) });
+  const getSettings = async () => {
+    const saved = await get('settings', {});
+    // one-time: before the model picker, the old default (Opus) was stored without being chosen → switch it to Haiku
+    if (saved.ai && !saved.ai.modelChosen && saved.ai.model !== DEFAULT_AI_MODEL) {
+      saved.ai = { ...saved.ai, model: DEFAULT_AI_MODEL };
+      await set('settings', saved);
+    }
+    return { ...DEFAULT_SETTINGS, ...saved };
+  };
   const saveSettings = async (patch) => set('settings', { ...(await getSettings()), ...patch });
+
+  /** Claude models offered in Settings. fallback: the model supports the server-side refusal fallback. */
+  const AI_MODELS = [
+    { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5 (fastest, lowest cost)', fallback: false },
+    { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5 (balanced)', fallback: true },
+    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5 (most accurate on hard pages)', fallback: true },
+    { id: 'claude-fable-5-2', name: 'Claude Fable 5.2 (most capable, highest cost)', fallback: true },
+  ];
+  const DEFAULT_AI_MODEL = 'claude-haiku-5-5';
 
   const DEFAULT_SETTINGS = {
     backup: { enabled: false, interval: 'weekly', keep: 8, lastRun: 0, lastResult: null, lastDataVersion: 0 },
-    ai: { enabled: false, apiKey: '', model: 'claude-opus-5-5' },
+    ai: { enabled: false, apiKey: '', model: DEFAULT_AI_MODEL },
     privacy: { categories: { 'Name': 'mask', 'National ID': 'mask', 'MRN': 'mask', 'Phone': 'mask', 'Mobile': 'mask', 'Address': 'mask', 'Registered address': 'mask', 'Email': 'mask', 'Birth date': 'mask' }, customTerms: [] },
     fill: { overwrite: false },
   };
 
   PDB.db = { open, putRows, editValue, setCommonLabels, deleteRows, allRows, rowsByPatient, rowsByLabels, existingFor, patients, mergePatients, clearAll,
-    sha256, putBlob, getBlob, allBlobMeta, get, set, getVocab, learnAlias, getTemplates, saveTemplates, getSettings, saveSettings, DEFAULT_SETTINGS,
+    sha256, putBlob, getBlob, allBlobMeta, get, set, getVocab, learnAlias, getTemplates, saveTemplates, getSettings, saveSettings, DEFAULT_SETTINGS, AI_MODELS, DEFAULT_AI_MODEL,
     migrateTemplates, getPageTemplates, savePageTemplates, savePageTemplate, deletePageTemplate, putSample, getSample, allSamples,
     getImageReadings, putImageReading, forgetImageReadings };
 })(globalThis);

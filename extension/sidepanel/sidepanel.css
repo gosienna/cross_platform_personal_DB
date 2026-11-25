@@ -26,6 +26,11 @@
 .payload { white-space: pre-wrap; max-height: 45vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 6px; font-size: 12px; }
 .payload mark { background: #ddd; color: #333; border-radius: 3px; cursor: pointer; padding: 0 2px; }
 .payload mark.amber { background: #ffd970; }
+.payload mark.you { background: #333; color: #fff; }
+#dlgForm { position: relative; }
+.blockpop { position: absolute; z-index: 5; display: flex; gap: 4px; padding: 4px; background: var(--bg, #fff); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+.blockpop[hidden] { display: none; }
+.blockpop button { font-size: 12px; padding: 2px 8px; }
 .payload mark.sent { background: none; text-decoration: underline dotted; color: inherit; }
 .listtools { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; position: sticky; top: 41px; background: var(--bg); z-index: 1; padding: 4px 0; }
 .listtools input[type=search] { flex: 1; min-width: 0; }

@@ -429,6 +429,8 @@
     aiCard.textContent = '';
     const aiEn = h('input', { type: 'checkbox', checked: ai.enabled });
     const key = h('input', { type: 'password', value: ai.apiKey, placeholder: 'sk-ant-…', style: 'width:320px' });
+    const curModel = DB.AI_MODELS.some((m) => m.id === ai.model) ? ai.model : DB.DEFAULT_AI_MODEL;
+    const model = h('select', {}, DB.AI_MODELS.map((m) => h('option', { value: m.id, selected: m.id === curModel }, m.name)));
     const cats = h('div', { class: 'kv' });
     const catSel = {};
     for (const [l, pol] of Object.entries(pr.categories)) {
@@ -440,11 +442,12 @@
     aiCard.append(h('h3', { style: 'margin-top:0' }, 'AI extract (Claude) and privacy'),
       h('p', { class: 'mut small' }, 'Off by default. When on, the side panel can send a masked copy of a page to Anthropic with your own API key. Every run shows exactly what will be sent; identifiers left in the text block sending.'),
       h('div', { class: 'row' }, h('label', {}, aiEn, ' Enabled'), ' API key ', key),
+      h('div', { class: 'row' }, ' Model ', model, h('span', { class: 'small mut' }, ' Used for AI extract and for reading pictures. Larger models read difficult pages better but cost more per run.')),
       h('p', { class: 'small' }, 'What to do with each kind of personal data before sending: mask = always replace; ask = you decide each time; send = leave as is.'), cats,
       h('p', { class: 'small' }, 'Custom terms to always mask'), terms,
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: async () => {
         const categories = {}; for (const [l, sel] of Object.entries(catSel)) categories[l] = sel.value;
-        await DB.saveSettings({ ai: { ...ai, enabled: aiEn.checked, apiKey: key.value.trim() }, privacy: { ...pr, categories, customTerms: terms.value.split('\n').map((x) => x.trim()).filter(Boolean) } });
+        await DB.saveSettings({ ai: { ...ai, enabled: aiEn.checked, apiKey: key.value.trim(), model: model.value, modelChosen: true }, privacy: { ...pr, categories, customTerms: terms.value.split('\n').map((x) => x.trim()).filter(Boolean) } });
         renderSettings();
       } }, 'Save')),
       h('details', {}, h('summary', {}, `Audit log: what was sent (${log.length})`), log.map((e) => h('div', { class: 'card small' }, h('div', { class: 'mut' }, `${new Date(e.at).toLocaleString()} · ${e.source}`), h('pre', { class: 'mono', style: 'white-space:pre-wrap;max-height:200px;overflow:auto' }, e.text), e.image ? h('img', { src: e.image, style: 'max-width:300px' }) : null))));

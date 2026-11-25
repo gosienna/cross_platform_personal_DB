@@ -5,7 +5,11 @@
  */
 (function (g) {
   const PDB = (g.PDB = g.PDB || {});
-  const MODEL = 'claude-opus-5-5';
+  /** The model chosen in Settings, or the default when it is missing or no longer offered. */
+  const modelOf = (settings) => {
+    const id = settings && settings.ai && settings.ai.model;
+    return PDB.db.AI_MODELS.find((m) => m.id === id) || PDB.db.AI_MODELS.find((m) => m.id === PDB.db.DEFAULT_AI_MODEL);
+  };
 
   const SCHEMA = {
     type: 'object', additionalProperties: false, required: ['records'],
@@ -42,6 +46,8 @@
       'Values: dates as YYYY-MM-DD; sex as male/female/other; numbers without units, converted to the unit shown in brackets; blood pressure as "systolic/diastolic"; blood glucose with a meal-time tag as label "Blood glucose (AC)" / "(PC)" / "(HS)".',
       'Medication: one row per medication, label "Medication", value "drug strength; dose; frequency; route; days; start~end; hospital dept; doctor" (leave out parts that are missing), time = start date.',
       'text: the value exactly as it is written on the page (copied character for character, placeholders as they appear), so it can be found on the page again.',
+      'Why "text" matters: your answer is not saved as data. The system searches the page for the one element whose text equals your "text", records that element\'s CSS selector in a page template, and from then on reads the value from that selector itself, without you. So copy only the value as it appears inside its own element: no label, no unit that sits in a separate element, no reformatting. If the same text appears in several places, the system cannot tell which one you meant and drops the row.',
+      'Example: the page shows "血壓" next to a cell "149/71" followed by "mmHg" in a separate cell, under a column dated "115/10/07 08:30". Return {"label": "Blood pressure", "value": "149/71", "text": "149/71", "time": "2026-10-07 08:30"}. The system finds the cell "149/71", saves a selector such as "table#vitals tr:nth-child(3) > td:nth-child(2)" for Blood pressure, and links the time to the date cell. Returning "text": "血壓 149/71 mmHg" would match no single element.',
       'time: "nan" for labels marked [persistent]; otherwise the measurement/record time as "YYYY-MM-DD HH:mm" (or "YYYY-MM-DD"), in the page\'s local time; "" if the page gives no time.',
       'Skip readings whose only time is relative (e.g. "4小時前"). Skip menus, buttons, staff schedules and page chrome. Do not invent data.',
     ].join('\n');
@@ -76,7 +82,7 @@
     return { records, regions: [], broken: [] };
   }
 
-  async function callClaude({ apiKey, text, imageB64, system = systemPrompt(), schema = SCHEMA, prefix = 'Page text:\n<page>\n', suffix = '\n</page>' }) {
+  async function callClaude({ apiKey, model, text, imageB64, system = systemPrompt(), schema = SCHEMA, prefix = 'Page text:\n<page>\n', suffix = '\n</page>' }) {
     if (!g.Anthropic) throw new Error('The Anthropic SDK is not bundled yet. Run "npm run build:vendor" and reload the extension.');
     const Anthropic = g.Anthropic.default || g.Anthropic;
     const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
@@ -84,10 +90,10 @@
     if (imageB64) content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageB64 } });
     content.push({ type: 'text', text: `${prefix}${text}${suffix}` });
     const response = await client.beta.messages.create({
-      model: MODEL,
+      model: model.id,
       max_tokens: 16000,
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
+      // refusal fallback only where the model supports it (not Haiku)
+      ...(model.fallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
       thinking: { type: 'adaptive' },
       output_config: { effort: 'medium', format: { type: 'json_schema', schema } },
       system,
@@ -109,33 +115,117 @@
       form.textContent = '';
       const pane = h('div', { class: 'payload' });
       const info = h('div', { class: 'small' });
+      const note = h('div', { class: 'small mut' });
+      const L = PDB.redact.CAT_LABEL;
       const draw = () => {
+        hidePop();
         pane.textContent = '';
         let pos = 0;
+        // every piece carries its offsets in `text`, so a selection maps back exactly
+        const seg = (a, b) => { if (b > a) pane.append(h('span', { 'data-s': a }, text.slice(a, b))); };
         for (const s of spans) {
           if (s.start < pos) continue;
-          pane.append(text.slice(pos, s.start));
-          const mk = h('mark', { class: s.decision === 'send' ? 'sent' : s.decision == null ? 'amber' : '', title: `${PDB.redact.CAT_LABEL[s.cat]} · ${s.conf === 'high' ? 'detected' : 'uncertain'} · click to ${s.decision === 'mask' ? 'send it' : 'mask it'}` },
-            s.decision === 'send' ? s.text : s.decision == null ? `${s.text} ?` : `■ ${PDB.redact.CAT_LABEL[s.cat]}`);
-          mk.onclick = () => { s.decision = s.decision === 'mask' ? 'send' : 'mask'; draw(); };
+          seg(pos, s.start);
+          const mine = s.source === 'you';
+          const mk = h('mark', {
+            class: mine ? 'you' : s.decision === 'send' ? 'sent' : s.decision == null ? 'amber' : '', 'data-s': s.start, 'data-e': s.end,
+            title: mine ? `${L[s.cat]} · click to unblock` : `${L[s.cat]} · ${s.conf === 'high' ? 'detected' : 'uncertain'} · click to ${s.decision === 'mask' ? 'send it' : 'mask it'}`,
+          }, mine ? `■ ${s.text}` : s.decision === 'send' ? s.text : s.decision == null ? `${s.text} ?` : `■ ${L[s.cat]}`);
+          mk.onclick = () => {
+            if (mine) spans.splice(spans.indexOf(s), 1);
+            else s.decision = s.decision === 'mask' ? 'send' : 'mask';
+            draw();
+          };
           pane.append(mk);
           pos = s.end;
         }
-        pane.append(text.slice(pos));
+        seg(pos, text.length);
         const undecided = spans.filter((s) => s.decision == null).length;
-        info.textContent = `${spans.filter((s) => s.decision === 'mask').length} masked · ${spans.filter((s) => s.decision === 'send').length} you chose to send · ${undecided} need your decision (amber).`;
+        const yours = spans.filter((s) => s.source === 'you').length;
+        info.textContent = `${spans.filter((s) => s.decision === 'mask').length} masked${yours ? ` (${yours} blocked by you)` : ''} · ${spans.filter((s) => s.decision === 'send').length} you chose to send · ${undecided} need your decision (amber).`;
         sendBtn.disabled = undecided > 0 || (imgBox && imgCb.checked && !checkedCb.checked);
       };
-      const maskSel = h('button', { type: 'button', onclick: () => {
+      /** Block text[a, b): grows over any detected item it touches, which it then replaces. */
+      const block = (a, b) => {
+        for (const s of spans) if (s.start < b && s.end > a) { a = Math.min(a, s.start); b = Math.max(b, s.end); }
+        for (let i = spans.length - 1; i >= 0; i--) if (spans[i].start >= a && spans[i].end <= b) spans.splice(i, 1);
+        spans.push({ start: a, end: b, text: text.slice(a, b), cat: 'blocked', conf: 'high', source: 'you', decision: 'mask' });
+      };
+      const places = (v) => { const at = []; let i = text.indexOf(v); while (i >= 0) { at.push(i); i = text.indexOf(v, i + v.length); } return at; };
+      /** Block a value in every place it appears in the text. Returns how many places. */
+      const blockAll = (v) => {
+        const at = places(v);
+        for (const i of at.reverse()) block(i, i + v.length);
+        spans.sort((x, y) => x.start - y.start);
+        return at.length;
+      };
+      const alwaysBlock = async (v) => {
+        const st = await PDB.db.getSettings();
+        const terms = st.privacy.customTerms || [];
+        if (!terms.includes(v)) await PDB.db.saveSettings({ privacy: { ...st.privacy, customTerms: terms.concat([v]) } });
+      };
+      // a selection in the text → offsets in `text` (a selection that ends inside a masked item takes all of it)
+      const offsetAt = (node, off, edge) => {
+        let el = node.nodeType === 3 ? node.parentNode : node;
+        if (el === pane) { const c = pane.childNodes[off]; return c ? +c.dataset.s : text.length; }
+        while (el && el.parentNode !== pane) el = el.parentNode;
+        if (!el) return null;
+        if (el.tagName === 'MARK') return edge === 'start' ? +el.dataset.s : +el.dataset.e;
+        return +el.dataset.s + (node.nodeType === 3 ? off : off ? el.textContent.length : 0);
+      };
+      const selected = () => {
         const sel = document.getSelection();
-        if (!sel || sel.isCollapsed || !pane.contains(sel.anchorNode)) return;
-        const t = sel.toString().trim();
-        if (t.length < 2) return;
-        let i = text.indexOf(t);
-        while (i >= 0) { if (!spans.some((s) => i < s.end && i + t.length > s.start)) spans.push({ start: i, end: i + t.length, text: t, cat: 'term', conf: 'high', source: 'you', decision: 'mask' }); i = text.indexOf(t, i + t.length); }
-        spans.sort((a, b) => a.start - b.start);
+        if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+        const r = sel.getRangeAt(0);
+        if (!pane.contains(r.startContainer) || !pane.contains(r.endContainer)) return null;
+        let a = offsetAt(r.startContainer, r.startOffset, 'start'), b = offsetAt(r.endContainer, r.endOffset, 'end');
+        if (a == null || b == null) return null;
+        while (a < b && /\s/.test(text[a])) a++;
+        while (b > a && /\s/.test(text[b - 1])) b--;
+        if (b <= a) return null;
+        if (spans.some((s) => s.start <= a && s.end >= b)) return null; // inside one item: click it instead
+        return { a, b, rect: r.getBoundingClientRect ? r.getBoundingClientRect() : pane.getBoundingClientRect() };
+      };
+      // the small "Block" bar shown over a selection
+      let pending = null;
+      const keep = (e) => e.preventDefault(); // keep the selection when pressing the bar's buttons
+      const popOne = h('button', { type: 'button', onmousedown: keep, onclick: () => { if (!pending) return; const { a, b } = pending; block(a, b); spans.sort((x, y) => x.start - y.start); draw(); } });
+      const popAll = h('button', { type: 'button', onmousedown: keep, onclick: () => { if (!pending) return; const n = blockAll(pending.v); draw(); note.textContent = `Blocked in ${n} places.`; } });
+      const popAlways = h('button', { type: 'button', onmousedown: keep, title: 'Also add it to Settings → Custom terms to always mask, for every page', onclick: async () => {
+        if (!pending) return; const v = pending.v; const n = blockAll(v); draw(); await alwaysBlock(v); note.textContent = `Blocked in ${n} places, and added to your custom terms: it will be masked on every page.`;
+      } }, 'Always block');
+      const pop = h('div', { class: 'blockpop', hidden: true }, popOne, popAll, popAlways);
+      function hidePop() { pop.hidden = true; pending = null; }
+      const showPop = () => {
+        const s = selected();
+        if (!s) return hidePop();
+        const v = text.slice(s.a, s.b);
+        const n = places(v).length;
+        pending = { ...s, v };
+        popOne.textContent = n > 1 ? 'Block here' : 'Block';
+        popAll.hidden = n < 2;
+        popAll.textContent = `Block all ${n}`;
+        popAlways.hidden = v.length < 2 || v.length > 80;
+        pop.hidden = false;
+        const box = form.getBoundingClientRect();
+        pop.style.left = `${Math.max(0, s.rect.left - box.left)}px`;
+        pop.style.top = `${s.rect.bottom - box.top + 4}px`;
+      };
+      pane.addEventListener('mouseup', () => setTimeout(showPop, 0));
+      pane.addEventListener('keyup', (e) => { if (e.shiftKey || e.key.startsWith('Arrow')) showPop(); });
+      pane.addEventListener('scroll', hidePop);
+      // type a value to block (for text that is hard to select)
+      const typed = h('input', { type: 'text', placeholder: 'Type a value to block, e.g. a name or number', style: 'flex:1;min-width:200px' });
+      const blockTyped = () => {
+        const v = typed.value.trim();
+        if (!v) return;
+        const n = blockAll(v);
+        note.textContent = n ? `Blocked “${v}” in ${n} place${n > 1 ? 's' : ''}.` : `“${v}” does not appear in the text, so there is nothing to block.`;
+        if (n) typed.value = '';
         draw();
-      } }, 'Mask selected text');
+      };
+      typed.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); blockTyped(); } }); // Enter would close the dialog
+      const typedBtn = h('button', { type: 'button', onclick: blockTyped }, 'Block');
       const maskAmber = h('button', { type: 'button', onclick: () => { spans.forEach((s) => { if (s.decision == null) s.decision = 'mask'; }); draw(); } }, 'Mask all uncertain');
       // screenshot with black boxes; drag to add more
       let imgBox = null, imgCb = null, checkedCb = null, canvas = null;
@@ -161,9 +251,10 @@
       const sendBtn = h('button', { class: 'primary', type: 'button', onclick: () => { dlg.close('send'); } }, 'Send to Claude');
       form.append(
         h('b', {}, 'Review what will be sent to Anthropic'),
-        h('p', { class: 'small mut' }, 'Grey ■ = masked (replaced by a placeholder). Amber ? = uncertain, click to decide. Click any masked item to send it instead. Only this text', screenshot ? ' (and the image, if you tick it)' : '', ' leaves your computer.'),
+        h('p', { class: 'small mut' }, 'Grey ■ = masked (replaced by a placeholder). Amber ? = uncertain, click to decide. Click any masked item to send it instead. To block anything else, select it in the text and press Block (dark ■ = blocked by you; click to unblock). Only this text', screenshot ? ' (and the image, if you tick it)' : '', ' leaves your computer.'),
         truncated ? h('p', { class: 'small', style: 'color:#d33' }, 'The page is very long; only the first 60 000 characters are shown and sent. Use Pick region for the rest.') : null,
-        pane, info, h('div', { class: 'btns', style: 'justify-content:flex-start' }, maskSel, maskAmber),
+        pane, pop, info,
+        h('div', { class: 'btns', style: 'justify-content:flex-start' }, typed, typedBtn, maskAmber), note,
         screenshot ? h('label', { class: 'small' }, imgCb, ' Also send a screenshot (needed for charts drawn as images)') : null, imgBox,
         h('div', { class: 'btns' }, h('button', { type: 'button', onclick: () => dlg.close('') }, 'Cancel'), sendBtn));
       dlg.onclose = () => resolve(dlg.returnValue === 'send' ? { spans, image: imgCb && imgCb.checked ? canvas.toDataURL('image/png').split(',')[1] : null } : null);
@@ -217,7 +308,7 @@
     if (!check.ok) { await blocked(check.left); return status('Blocked: the text still contained identifiers. Nothing was sent.', true); }
     await audit({ at: Date.now(), source: st.source, text: out, image: review.image ? `data:image/png;base64,${review.image}` : null });
     status('Asking Claude… (only the masked text' + (review.image ? ' and the masked image' : '') + ' was sent)');
-    const parsed = await callClaude({ apiKey: s.ai.apiKey, text: out, imageB64: review.image });
+    const parsed = await callClaude({ apiKey: s.ai.apiKey, model: modelOf(s), text: out, imageB64: review.image });
     await onResult([{ frameId: 0, result: toFrameResult(parsed, map) }]);
   }
 
@@ -331,12 +422,12 @@
       if (!check.ok) { await blocked(check.left); break; }
       await audit({ at: Date.now(), source, text: hint, image: `data:image/png;base64,${review.image}` });
       status(`Claude is reading “${p.label}”… (only the picture with its black boxes and the line of text above were sent)`);
-      const parsed = await callClaude({ apiKey: s.ai.apiKey, text: hint, imageB64: review.image, system: imagePrompt(), schema: IMAGE_SCHEMA, prefix: '', suffix: '' });
+      const parsed = await callClaude({ apiKey: s.ai.apiKey, model: modelOf(s), text: hint, imageB64: review.image, system: imagePrompt(), schema: IMAGE_SCHEMA, prefix: '', suffix: '' });
       await onRead(i, { rows: (parsed.rows || []).filter((r) => r && String(r.value || '').trim()), mask: review.mask });
       n++;
     }
     return n;
   }
 
-  g.AIFlow = { run, toFrameResult, SCHEMA, systemPrompt, readImages, imagePrompt, IMAGE_SCHEMA, imageHint };
+  g.AIFlow = { run, modelOf, reviewDialog, toFrameResult, SCHEMA, systemPrompt, readImages, imagePrompt, IMAGE_SCHEMA, imageHint };
 })(globalThis);
