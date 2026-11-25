@@ -371,3 +371,31 @@ test('side panel: a picture in the page template — values reused per picture, 
   assert.ok([...w.document.querySelectorAll('#pages button')].some((b) => b.textContent === 'Read with AI'));
   assert.deepEqual(errors, []);
 });
+
+test('dashboard: Mappings → Export check downloads one template checked against its sample page, without patient values', async () => {
+  const { PDB } = require('./helpers/load.js');
+  const doc = new JSDOM(`<body><div><span>填表日期</span><span>115/10/07</span></div><div><span>姓名</span><span>測試甲</span></div>
+    <div><span>體重</span><span>60</span></div></body>`).window.document;
+  const ex = PDB.dom.extractFromRoot(doc, { origin: 'https://his.example', registry: PDB.dom.makeRegistry(), templates: [] });
+  const tpl = { ...PDB.pagetpl.draft(doc, ex, { origin: 'https://his.example', framePath: '/form/*', title: 'Assessment' }), complete: true };
+  const html = PDB.pagetpl.snapshot(doc, tpl, PDB.pagetpl.extract(doc, tpl, { registry: PDB.dom.makeRegistry() }));
+  const { w, errors } = await loadPage('dashboard/dashboard.html');
+  const blobs = [];
+  w.URL.createObjectURL = (b) => { blobs.push(b); return 'blob:x'; };
+  await w.PDB.db.savePageTemplate(JSON.parse(JSON.stringify(tpl)));
+  await w.PDB.db.putSample({ id: tpl.id, html, width: 900 });
+  w.document.querySelector('[data-view="mappings"]').click();
+  await tick(200);
+  const row = [...w.document.querySelectorAll('#ptList tbody tr')].find((tr) => tr.textContent.includes('/form/*'));
+  [...row.querySelectorAll('button')].find((b) => b.textContent === 'Export check').click();
+  await tick(200);
+  assert.deepEqual(errors, []);
+  assert.equal(blobs.length, 1, 'one file downloaded');
+  const text = await blobs[0].text();
+  const chk = JSON.parse(text);
+  assert.equal(chk.format, 'personal-db-template-check');
+  assert.equal(chk.source, 'sample');
+  assert.equal(chk.summary.found, chk.summary.fields);
+  assert.ok(!text.includes('測試甲'), 'no patient value');
+  assert.equal(w.document.querySelector('#ptDetail').textContent, '', 'the row was not opened by the click');
+});

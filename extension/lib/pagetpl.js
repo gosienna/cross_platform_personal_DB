@@ -163,6 +163,12 @@
           tpl.fields.push(f); els.set(f.id, kind === 'group' ? el : target); values.set(f.id, it.value);
         }
       }
+      // what the fields read (a name, a contact person) is no context or label text of a field
+      for (const f of tpl.fields) {
+        const others = otherValues(tpl, f.id, (id) => values.get(id));
+        f.context = T().stripValues(f.context, others);
+        if (f.kind !== 'group') f.anchor = T().anchorOk(f.anchor, others);
+      }
       for (const f of tpl.fields) f.time = defaultTime(tpl, f);
       for (const t of tpl.tables) if (t.layout === 'list' && !(t.time.cols || []).length) {
         const rd = recordDateFor(tpl, 'p');
@@ -170,6 +176,33 @@
       }
       return tpl;
     });
+  }
+
+  /** A page title without the values read on the page (each becomes "…"). */
+  function cleanTitle(title, values) {
+    let out = String(title || '');
+    for (const v of (values || []).filter((x) => typeof x === 'string').map((x) => C().clean(x)).filter((x) => x.length >= 2).sort((a, b) => b.length - a.length)) out = out.split(v).join('…');
+    return out;
+  }
+  /** The values the fields of a template read, its own included (strings of 2+ characters): none is context of a field. */
+  const otherValues = (tpl, id, valueOf) => tpl.fields.map((x) => valueOf(x.id)).filter((v) => typeof v === 'string' && C().clean(v).length >= 2);
+  /**
+   * Older templates (and fields taught on another record) can keep text of that record: another patient's name next to
+   * the field, a contact person as its label text. When the field is found, such pieces are removed — only removed,
+   * never replaced, so the template settles and is not changed again on the next record. Returns true if changed.
+   */
+  function tidyField(f, p, others, pageHas) {
+    if (f.kind === 'image' || (p.how !== 'selector' && p.how !== 'context')) return false;
+    const live = T().contextFor(p.el, null, true);
+    const keep = (f.context || []).filter((k) => k && !T().volatileText(k) && (k.length >= 20 || live.some((c) => c === k || c.startsWith(k) || k.startsWith(c))));
+    const kept = T().stripValues(keep, others);
+    let changed = kept.length !== (f.context || []).length;
+    if (changed) f.context = kept;
+    if (f.kind !== 'group' && f.anchor && (!pageHas(f.anchor) || !T().anchorOk(f.anchor, others))) {
+      if (f.rawLabel === f.anchor) f.rawLabel = f.label === IGNORE ? '' : f.label;
+      f.anchor = null; changed = true;
+    }
+    return changed;
   }
 
   // ── strict reading ───────────────────────────────────────────────────
@@ -236,8 +269,21 @@
         if (fresh) { f.context = T().contextFor(p.el); f.live = true; changed = true; }
         const box = p.group ? p.group.container : p.el;
         const hidden = p.group ? p.group.opts.every((o) => D().isHidden(o)) : D().isHidden(p.el);
-        located.set(f.id, { el: p.el, box, group: p.group || null, raw: readField(f, p), hidden, how: p.how });
+        located.set(f.id, { el: p.el, box, group: p.group || null, raw: readField(f, p), hidden, how: p.how, p });
       }
+      // found fields drop text left from another record (see tidyField)
+      let bodyText = null;
+      const pageHas = (s) => { if (bodyText == null) bodyText = C().clean((doc.body || doc.documentElement).textContent || ''); return bodyText.includes(C().clean(s)); };
+      for (const f of tpl.fields) {
+        const l = located.get(f.id);
+        if (l && tidyField(f, l.p, otherValues(tpl, f.id, (id) => (located.get(id) || {}).raw), pageHas)) changed = true;
+      }
+      // the page title saved with the template ("住民檔案 | <name>") keeps no value read on the page
+      if (tpl.title) {
+        const t = cleanTitle(tpl.title, [...located.values()].map((l) => l.raw));
+        if (t !== tpl.title) { tpl.title = t; changed = true; }
+      }
+      for (const l of located.values()) delete l.p;
       const timeOf = (link) => {
         if (!link || link.mode === 'capture') return { t: undefined };
         if (link.mode === 'nan') return { t: 'nan' };
@@ -527,14 +573,18 @@
   }
   /** Other fields of a template reading the same label (labels that hold several values, like Medication, excepted). */
   const sameLabel = (tpl, label, f) => (C().isMulti(label) ? [] : tpl.fields.filter((x) => x.label === label && x.selector !== f.selector));
-  /** A clicked element (Teach / pick in the sample page) → a field. target: { el, group? } */
-  function fieldFor(target) {
+  /**
+   * A clicked element (Teach / pick in the sample page) → a field. target: { el, group? }
+   * values: what the page's fields read now (from the last scan); they are left out of its context and label text.
+   */
+  function fieldFor(target, values) {
     const { el, group } = target;
     const kind = group ? 'group' : D().isPicture(el) ? 'image' : isCtl(el) ? 'control' : 'text';
     const value = group ? D().groupValue(group) : kind === 'image' ? '' : kind === 'control' ? D().readControl(el) : D().textOf(el);
-    const anchor = group ? group.label || T().anchorFor(el) : T().anchorFor(el);
+    const others = (values || []).concat(group || kind === 'image' ? [] : [value]);
+    const anchor = group ? group.label || T().anchorFor(el) : T().anchorOk(T().anchorFor(el), others);
     return {
-      kind, selector: T().selectorFor(el), anchor, rawLabel: anchor || '', context: T().contextFor(el), tag: el.tagName,
+      kind, selector: T().selectorFor(el), anchor, rawLabel: anchor || '', context: T().contextFor(el, others), tag: el.tagName,
       value: String(value || '').slice(0, 200), framePath: T().pagePath(el.ownerDocument.location ? el.ownerDocument.location.pathname : ''),
       options: group ? group.opts.map(D().optionLabelText).filter(Boolean).slice(0, 30) : undefined,
     };

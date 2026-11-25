@@ -355,7 +355,8 @@
         h('td', {}, count(t)), h('td', {}, t.tables.length),
         h('td', {}, t.complete ? h('span', { class: 'badge new' }, 'full') : h('span', { class: 'badge map', title: 'An older template with taught fields only: completed the next time you save this page' }, 'taught fields only')),
         h('td', { class: 'small mut' }, t.updatedAt ? new Date(t.updatedAt).toLocaleString() : ''),
-        h('td', {}, h('button', { class: 'link danger', onclick: async (e) => {
+        h('td', {}, h('button', { class: 'link', title: 'Download this template checked against its saved sample page: where each field is found, or why not. No patient data: text kept from a record is shown only by its shape.', onclick: (e) => { e.stopPropagation(); exportCheck(t); } }, 'Export check'), ' ',
+          h('button', { class: 'link danger', onclick: async (e) => {
           e.stopPropagation();
           if (!confirm(`Delete the template of ${t.origin}${t.framePath}? The page will get a new draft from the built-in rules next time.`)) return;
           await DB.deletePageTemplate(t.id); if (openTpl === t.id) openTpl = null; renderPageTemplates();
@@ -364,6 +365,18 @@
     const t = list.find((x) => x.id === openTpl);
     if (t) await TplView.render($('#ptDetail'), t, { zoom: 'fit', onSaved: () => { ownSave = Date.now(); return renderPageTemplates(false); } });
     else $('#ptDetail').textContent = '';
+  }
+  /**
+   * One template as a review file: checked against its masked sample page (values there are placeholders), so text the
+   * template kept from a record comes out only as its shape. For a full copy (backup, another browser): Export mappings.
+   */
+  async function exportCheck(t) {
+    const sample = await DB.getSample(t.id).catch(() => null);
+    const doc = new DOMParser().parseFromString(sample ? sample.html : '<!doctype html><html><body></body></html>', 'text/html');
+    const chk = PDB.tplcheck.check(doc, t, { origin: t.origin, page: { path: t.framePath || '', query: t.query || '' }, source: sample ? 'sample' : 'none' });
+    if (!sample) chk.note = 'This template has no saved sample page: nothing could be found. Export check in the side panel, on the page itself, shows more.';
+    const name = `template-check-${(t.framePath || 'page').replace(/[^\w*-]+/g, '_').replace(/\*/g, 'x').replace(/^_+|_+$/g, '') || 'page'}.json`;
+    download(name, new Blob([JSON.stringify(chk, null, 1)], { type: 'application/json' }));
   }
   // a template changed in the side panel: show the new version
   let ownSave = 0;

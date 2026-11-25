@@ -4,7 +4,7 @@ const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
 const ROOT = path.join(__dirname, '..', '..');
-for (const f of ['schema.js', 'core.js', 'dom.js', 'templates.js', 'pagetpl.js', 'fill.js', 'zip.js', 'crypto.js', 'export.js', 'backup.js', 'redact.js']) require(path.join(ROOT, 'extension', 'lib', f));
+for (const f of ['schema.js', 'core.js', 'dom.js', 'templates.js', 'pagetpl.js', 'fill.js', 'zip.js', 'crypto.js', 'export.js', 'backup.js', 'redact.js', 'tplcheck.js']) require(path.join(ROOT, 'extension', 'lib', f));
 const PDB = globalThis.PDB;
 
 function docFrom(file) {

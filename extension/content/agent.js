@@ -10,6 +10,9 @@
 
   let reg = PDB.dom.makeRegistry();
   let marks = [];
+  // what the fields read in the last scan: left out of the context of a field taught next (another patient's name is no label)
+  let lastValues = [];
+  const valuesOf = (res) => [...res.located.values()].map((l) => l.raw).filter((v) => typeof v === 'string' && v.trim());
   let fillState = null;
   let undoStack = null;
   let pickCleanup = null;
@@ -117,6 +120,7 @@
     if (tpl && (tpl.complete || tpl._draft)) {
       reg = PDB.dom.makeRegistry();
       const res = PT.extract(document, tpl, { ...ctx, registry: reg });
+      lastValues = valuesOf(res);
       const unc = tpl._draft ? [] : PT.uncovered(document, tpl, res, { ...ctx, templates: [] });
       // fields cancelled in the template, where they are on the page (shown greyed, to bring back)
       const ignored = tpl.fields.filter((f) => f.label === PT.IGNORE && res.located.has(f.id))
@@ -134,6 +138,7 @@
     if (partial) d._partial = true;
     reg = PDB.dom.makeRegistry();
     const res = PT.extract(document, d, { ...ctx, registry: reg });
+    lastValues = valuesOf(res);
     return { ...base, mode: 'draft', partial: !!partial, template: d, match, records: serialise(res.records), regions: res.regions, broken: [], uncovered: [], images: res.images || [] };
   }
   /** This frame's page compared with its template (see lib/tplcheck.js); null in other frames. */
@@ -178,7 +183,7 @@
     return mode === 'teach' ? { el } : null;
   }
   /** A taught field (Teach, or the element a time is read from), saved into a template by the side panel. */
-  const teachField = (target) => PDB.pagetpl.fieldFor(target);
+  const teachField = (target) => PDB.pagetpl.fieldFor(target, lastValues);
   function startPick(mode, ctx) {
     stopPick();
     ensureOverlay();

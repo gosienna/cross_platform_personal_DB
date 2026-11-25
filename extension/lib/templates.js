@@ -69,8 +69,34 @@
   // a placeholder in a saved sample page ("[Name]") is not page text
   const PLACEHOLDER = /^\s*\[[^\[\]]{1,40}\]\s*$/;
   /**
-   * Walk the document once; for every element accepted by `want`, record the last `n` text pieces before it
-   * (and the last whole text before it, for anchors). Returns [{ el, ctx: [farthest … nearest], last }].
+   * Data that changes from patient to patient is never context: dates, times, ages, numbers of 3+ digits (IDs, phone
+   * or bed numbers). Works on a context key, so pieces stored by older templates are judged the same way.
+   */
+  const volatileKey = (k) => !k || /\d{3}/.test(k) || /\d{1,4}[\/\-]\d{1,2}/.test(k) || /\d+歲/.test(k) || /^\[[^\]]*\]$/.test(k);
+  const volatileText = (t) => PLACEHOLDER.test(String(t || '')) || volatileKey(ctxKey(t));
+  const stable = (ctx) => (ctx || []).filter((k) => k && !volatileKey(k));
+  /*
+   * A sentence (20+ characters) may be a long form label, or a notice that changes between visits (the announcement
+   * at the top of a page). It counts when it matches, but is not needed: a notice that changed does not lose the field.
+   */
+  const longKey = (k) => k.length >= 20;
+  const needFor = (stored) => (stored.filter((k) => !longKey(k)).length >= 2 ? 2 : 1);
+  /**
+   * Context pieces that are values read on the same page (a name, a contact person) are not context either; they are
+   * removed with the page's known values. Returns the pieces kept.
+   */
+  function stripValues(ctx, values) {
+    const keys = [...new Set((values || []).map((v) => ctxKey(v)).filter((k) => k.length >= 2))];
+    if (!keys.length) return ctx || [];
+    return (ctx || []).filter((p) => !keys.some((k) => p === k || (k.length >= 3 && p.includes(k))));
+  }
+  /** An anchor (label text) that is a value read on the page is no anchor. */
+  const anchorOk = (anchor, values) => (anchor && stripValues([ctxKey(anchor)], values).length ? anchor : null);
+  /**
+   * Walk the document once; for every element accepted by `want`, record the last `n` stable text pieces before it
+   * (stored when a field is taught), a wider window (`wide`, compared when a field is looked for, so a value that slips
+   * in between two labels does not push a label out) and the last whole text before it (for anchors).
+   * Returns [{ el, ctx: [farthest … nearest], wide, last }].
    */
   function walkContexts(doc, want, n = 3) {
     const body = doc.body || doc.documentElement;
@@ -80,7 +106,7 @@
     const w = doc.createTreeWalker(body, 1 | 4);
     for (let node = w.currentNode; node; node = w.nextNode()) {
       if (node.nodeType === 1) {
-        if (want(node)) out.push({ el: node, ctx: recent.slice(-n), last });
+        if (want(node)) out.push({ el: node, ctx: recent.slice(-n), wide: recent.slice(-2 * n), last });
       } else {
         const p = node.parentElement;
         if (!p || SKIP_CTX.test(p.tagName) || p.closest('select,script,style,#' + D().OVERLAY_ID)) continue;
@@ -88,7 +114,7 @@
         const raw = PDB.core.clean(node.nodeValue);
         if (raw) last = raw;
         const k = ctxKey(node.nodeValue);
-        if (k.length >= 2 && recent[recent.length - 1] !== k) { recent.push(k); if (recent.length > 8) recent.shift(); }
+        if (k.length >= 2 && !volatileKey(k) && recent[recent.length - 1] !== k) { recent.push(k); if (recent.length > 8) recent.shift(); }
       }
     }
     return out;
@@ -114,11 +140,16 @@
   }
   function walkOne(el) {
     const c = cached(el.ownerDocument);
-    if (c) return c.byEl.get(el) || { ctx: [], last: '' };
-    return walkContexts(el.ownerDocument, (x) => x === el)[0] || { ctx: [], last: '' };
+    if (c) return c.byEl.get(el) || { ctx: [], wide: [], last: '' };
+    return walkContexts(el.ownerDocument, (x) => x === el)[0] || { ctx: [], wide: [], last: '' };
   }
-  /** Context of one element (for teaching). */
-  const contextFor = (el) => walkOne(el).ctx;
+  /** Context of one element (for teaching); with `values` (read on this page), those are left out too; `wide`: the wider window. */
+  const contextFor = (el, values, wide) => {
+    const w = walkOne(el);
+    if (wide) return w.wide || w.ctx;
+    if (!values || !values.length) return w.ctx;
+    return stripValues(w.wide, values).slice(-3);
+  };
   /** How well a stored context matches a candidate's (nearest pieces weigh most). */
   function ctxScore(stored, cand) {
     let score = 0;
@@ -146,27 +177,35 @@
    * A picture has no text of its own to show it is the right one, so the text right before it (its caption or label)
    * must be the same; otherwise a chart that moved into its place (e.g. temperature instead of glucose) would be read.
    */
-  const nearestOk = (field, stored, cand) => field.kind !== 'image' || ctxMatch(stored[stored.length - 1], cand[cand.length - 1]);
+  /*
+   * Any other field: the nearest short piece stored (normally its own label) must still be among the pieces right
+   * before it, so a field whose row is gone is not found on the next row by the labels further up.
+   */
+  function nearestOk(field, stored, cand) {
+    if (field.kind === 'image') return ctxMatch(stored[stored.length - 1], cand[cand.length - 1]);
+    const own = [...stored].reverse().find((k) => !longKey(k));
+    return !own || cand.some((c) => ctxMatch(c, own));
+  }
   /** Find the element whose preceding text best matches the stored context. */
   function findByContext(doc, field, want) {
-    const stored = (field.context || []).filter(Boolean);
+    const stored = stable(field.context);
     if (!stored.length) return null;
     if (typeof want !== 'function') want = wantFor(field, want ? 'fill' : 'extract', false);
     let best = null, bestScore = 0;
     for (const c of contexts(doc, want)) {
       if (!nearestOk(field, stored, c.ctx)) continue;
-      const s = ctxScore(stored, c.ctx);
+      const s = ctxScore(stored, c.wide || c.ctx);
       if (s > bestScore) { best = c.el; bestScore = s; }
     }
     // with several stored pieces, one weak match (e.g. a generic "其他：") is not enough
-    const need = stored.length >= 2 ? 2 : 1;
+    const need = needFor(stored);
     return bestScore >= need ? best : null;
   }
   const contextOk = (el, field) => {
-    const stored = (field.context || []).filter(Boolean);
+    const stored = stable(field.context);
     if (!stored.length) return true;
-    const cand = contextFor(el);
-    return nearestOk(field, stored, cand) && ctxScore(stored, cand) >= (stored.length >= 2 ? 2 : 1);
+    const w = walkOne(el);
+    return nearestOk(field, stored, w.ctx) && ctxScore(stored, w.wide || w.ctx) >= needFor(stored);
   };
   /** Find an element by anchor text: the element right after a short text equal to the anchor. */
   function findByAnchor(doc, anchor, wantControl) {
@@ -292,5 +331,5 @@
     return { pairs, broken, found };
   }
 
-  PDB.templates = { selectorFor, anchorFor, findByAnchor, locate, place, kindOf, forPage, applyExtract, pagePath, appliesTo, contextFor, findByContext, ctxKey, session, wantFor };
+  PDB.templates = { selectorFor, anchorFor, findByAnchor, locate, place, kindOf, forPage, applyExtract, pagePath, appliesTo, contextFor, findByContext, ctxKey, session, wantFor, volatileText, stripValues, anchorOk };
 })(globalThis);
